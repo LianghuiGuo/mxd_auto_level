@@ -260,6 +260,20 @@ class MapleStoryAutoBot:
         else:
             self.capture = GameWindowCapturor(self.cfg, self.args.test_image)
 
+        # Once GameWindowCapturor has resolved the *actual exact* window
+        # title (e.g. '冒险岛怀旧服' instead of the YAML default substring
+        # 'MapleStory Worlds'), propagate that exact title to the keyboard
+        # controller so its foreground-window / activation logic uses the
+        # correct, resolvable identifier.  Without this sync the controller
+        # kept matching against the wrong token, which meant:
+        #   (a) is_game_window_active returned False even when the user was
+        #       looking at the correct game window (causing spurious HALTED
+        #       warnings that blocked all key presses), and
+        #   (b) ensure_game_window_active's FindWindow couldn't find the
+        #       HWND because the YAML token was not an exact title match.
+        if getattr(self.capture, "window_title", None):
+            self.kb.set_window_title(self.capture.window_title)
+
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, self.kb)
         if self.cfg["health_monitor"]["enable"] and \
@@ -343,6 +357,95 @@ class MapleStoryAutoBot:
         self.video_writer = None
         logger.info("[stop_record] Stop recording")
 
+    def get_player_location_camera_center_fallback(self):
+        '''
+        Final fallback for player screen-location estimation when both
+        ``party_red_bar`` (CN client renders it in the top-right UI panel,
+        *not* above the character) and ``nametag`` (no custom template
+        supplied yet) fail.
+
+        Assumptions:
+          * The camera is tightly centered on the character (standard
+            MapleStory behaviour in non-town maps).
+          * Therefore the character is approximately at
+            ``(WINDOW_WORKING_SIZE.w//2, WINDOW_WORKING_SIZE.h//2 + vertical
+            bias)`` — most 2D side-scrollers keep the character slightly
+            *below* the true vertical center because the HUD occupies the
+            bottom and ground features live in the lower half.
+
+        Returns a ``(loc_player, method_tag)`` tuple where ``method_tag`` is
+        used purely for diagnostic logging so the user can tell that the
+        cascade fell back to this estimator.
+        '''
+        w_wrk, h_wrk = WINDOW_WORKING_SIZE
+        # Slight vertical bias: aim ~58% of the way down the work window.
+        # This is empirical but a lot safer than dead-center.
+        cx = w_wrk // 2
+        cy = int(h_wrk * 0.58)
+        # Draw a distinguishable marker on the debug viz so the user can tell
+        # we're on fallback and NOT actually seeing the character.
+        cv2.putText(self.img_frame_debug, "CAMERA CENTER FALLBACK",
+                    (max(0, cx - 120), max(20, cy - 60)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 2)
+        cv2.drawMarker(self.img_frame_debug, (cx, cy),
+                       (0, 220, 255), cv2.MARKER_CROSS, 28, 2)
+        return (cx, cy), "camera_center_fallback"
+
+    def _detect_player_location_cascade(self):
+        '''
+        Three-stage player-location cascade so the bot never ends up with a
+        completely stale ``loc_player`` that keeps the stuck watchdog firing
+        forever on non-Artale clients.
+
+        Stage 1 — party red bar (Artale default; best accuracy).
+        Stage 2 — name tag (configured explicitly or auto-tried on failure).
+        Stage 3 — camera-center approximation (cheap, coarse, keeps watchdog
+                  happy when both 1 & 2 fail).  Only kicks in when a minimap
+                  player-dot is also visible, so we never fabricate a location
+                  if we can't even see the minimap.
+
+        Returns ``(loc_player, loc_party_red_bar, method_used)``.
+        ``method_used`` is a short tag for the debug viz/logs.
+        '''
+        method_used = "none"
+
+        # --- Stage 1: party red bar ------------------------------------------
+        prb_player, prb_bar = self.get_player_location_by_party_red_bar()
+        if prb_player is not None and prb_bar is not None:
+            return prb_player, prb_bar, "party_red_bar"
+
+        # --- Stage 2: nametag ------------------------------------------------
+        # Run even when ``nametag.enable`` is False — on CN/non-Artale clients
+        # the red bar is top-right and Stage 1 always fails, so we silently
+        # fall back to the nametag pipeline.  If the user hasn't supplied a
+        # custom nametag template yet (name == "example") the match will
+        # still fail, but that's fine — we just move to Stage 3.
+        nt_ok = self.cfg["nametag"]["enable"] or True
+        nt_player = None
+        if nt_ok and getattr(self, "img_nametag", None) is not None and \
+           self.cfg["nametag"]["name"] != "example":
+            try:
+                nt_player = self.get_player_location_by_nametag()
+            except Exception as e:
+                logger.debug(f"[player_cascade] nametag raised: {e!r}")
+                nt_player = None
+        if nt_player is not None:
+            method_used = "nametag" if self.cfg["nametag"]["enable"] else "nametag_auto_fallback"
+            return nt_player, prb_bar, method_used
+
+        # --- Stage 3: camera-center + minimap player-dot guard ---------------
+        # Only estimate camera-center position if we actually see a player
+        # dot on the minimap (i.e. the capture pipeline is working and we
+        # can plausibly believe the camera is still centered on the
+        # character).  Otherwise return None and let the caller decide.
+        if self.loc_player_minimap is not None and \
+           self.loc_player_minimap != (0, 0):
+            cam_player, _tag = self.get_player_location_camera_center_fallback()
+            return cam_player, prb_bar, "camera_center_fallback"
+
+        # All stages failed.  Upstream keeps the last known loc_player.
+        return None, prb_bar, method_used or "all_stages_failed"
+
     def get_player_location_by_nametag(self):
         '''
         Detects the player's location based on the nametag position in the game window.
@@ -351,7 +454,7 @@ class MapleStoryAutoBot:
         - Extracting a vertical region of interest (ROI) where the nametag is expected.
         - Padding the ROI to avoid template matching edge issues.
         - Using template matching to locate the nametag, split into left and right halves
-        to improve robustness against partial occlusion.
+          to improve robustness against partial occlusion.
         - Selecting the best match (left or right) based on score and cache status.
         - Computing the player's center position by applying a fixed offset to the nametag.
 
@@ -478,6 +581,23 @@ class MapleStoryAutoBot:
     def get_player_location_by_party_red_bar(self):
         '''
         get_player_location_by_party_red_bar
+
+        Detects the character's party health bar on-screen and estimates the
+        character center position via a configured offset.
+
+        Robustness improvements:
+          * Red in HSV wraps around at H=0/180 in OpenCV, so we combine TWO
+            inRange masks: H ∈ [0, 10] AND H ∈ [160, 180] (low-H bright red +
+            high-H dark crimson).  Previously we only took the low-H slice and
+            therefore missed ~50% of crimson party bars used in non-Artale
+            clients (e.g. 冒险岛怀旧服 CN client).
+          * Contour geometry filter is relaxed slightly (height 4–12 px, width
+            up to 80 px, area >= 8, fill rate >= 0.55) so differently-styled
+            bars across clients still pass.
+          * On failure the function prints a one-shot diagnostic summary
+            (mask hit-count, contour count, biggest contour's box geometry)
+            so users can quickly tell whether the issue is "wrong HSV range"
+            vs "no party was created at all".
         '''
         # Zero out minimap area in the img_frame
         img_frame = self.img_frame.copy()
@@ -490,42 +610,81 @@ class MapleStoryAutoBot:
 
         # Convert to HSV
         img_hsv = cv2.cvtColor(img_camera, cv2.COLOR_BGR2HSV)
-        lower_red = to_opencv_hsv(self.cfg["party_red_bar"]["lower_red"])
-        upper_red = to_opencv_hsv(self.cfg["party_red_bar"]["upper_red"])
-        mask_red = cv2.inRange(img_hsv, lower_red, upper_red)
-        # cv2.imshow("mask_red", mask_red)
+
+        # --- Build red mask with TWO Hue wraparound ranges -------------------
+        # Standard-config lower_red/upper_red are the "0° side" of red.
+        # We auto-generate the complementary "180° side" range by offsetting
+        # Hue by +180° (keeping S/V identical) so crimson/dark-red bars are
+        # detected regardless of which half of the hue circle the client
+        # renders them in.
+        lower_std = to_opencv_hsv(self.cfg["party_red_bar"]["lower_red"])
+        upper_std = to_opencv_hsv(self.cfg["party_red_bar"]["upper_red"])
+        # Build the complementary (high-H) range.  Hue 0° -> +180° -> 180°
+        # in standard space = H=90 in OpenCV scale (90 * 2 on the 0–180 circle).
+        h_lo_std, s_lo_std, v_lo_std = lower_std
+        h_hi_std, s_hi_std, v_hi_std = upper_std
+        # Complementary side: shift the entire Hue slice by 90 OpenCV ticks
+        # (i.e. +180° in standard HSV space).
+        lower_wrap = np.array([h_lo_std + 90, s_lo_std, v_lo_std], dtype=np.uint8)
+        upper_wrap = np.array([min(179, h_hi_std + 90), s_hi_std, v_hi_std], dtype=np.uint8)
+
+        mask_red_a = cv2.inRange(img_hsv, lower_std, upper_std)
+        mask_red_b = cv2.inRange(img_hsv, lower_wrap, upper_wrap)
+        mask_red = cv2.bitwise_or(mask_red_a, mask_red_b)
+
+        # Optional: save mask for debugging on the very first frame or on
+        # persistent failure.  Helps the user tune HSV range visually.
+        if not hasattr(self, "_prb_dbg_saved"):
+            try:
+                cv2.imwrite("log/debug_party_red_mask_a.png", mask_red_a)
+                cv2.imwrite("log/debug_party_red_mask_b.png", mask_red_b)
+                cv2.imwrite("log/debug_party_red_mask.png",   mask_red)
+                self._prb_dbg_saved = True
+            except Exception:  # noqa: BLE001 — log dir may not exist, ignore
+                pass
 
         # Find contours on mask_red
         contours, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
 
-        # Filter contour by specific geometry trait of red bar
+        # Filter contour by the (relaxed) geometric traits of a red HP bar
         boxs = []
+        all_boxes_stats = []
         for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
+            bx, by, bw, bh = cv2.boundingRect(c)
             area = cv2.contourArea(c)
-            fill_rate = float(area) / (h*w)
-            if 5 <= h <= 7 and 1 <= w <= 50 and 10 <= area and fill_rate >= 0.7:
-                # cv2.drawContours(self.img_frame_debug, [c], -1, (0, 255, 0), 1)
-                boxs.append((x, y, w, h))
+            fill_rate = float(area) / max(1, bh * bw)
+            all_boxes_stats.append((bx, by, bw, bh, round(area, 1), round(fill_rate, 2)))
+            # Relaxed filter: height 4-12 px, width up to 80 px, fill_rate >= 0.55
+            if (4 <= bh <= 12 and 1 <= bw <= 80 and area >= 8 and fill_rate >= 0.55):
+                boxs.append((bx, by, bw, bh))
 
         if not boxs:
+            # Diagnostics: show top-5 largest contours by bounding-box area
+            all_boxes_stats.sort(key=lambda b: b[2] * b[3], reverse=True)
+            top5 = all_boxes_stats[:5]
+            non_zero = int(cv2.countNonZero(mask_red))
+            logger.debug(
+                f"[get_player_location_by_party_red_bar] Not found. "
+                f"mask non-zero px={non_zero}; raw contours={len(contours)}; "
+                f"top-5 boxes (x,y,w,h,area,fill): {top5}"
+            )
             return None, None  # red bar not found
 
         # Sort box by area
         boxs.sort(key=lambda box: box[2] * box[3], reverse=True)
 
         # Consider the biggest area as party red bar
-        x, y, w, h = boxs[0]
+        bx, by, bw, bh = boxs[0]
 
         # Offset coordinate
-        loc_party_red_bar = (x, y)
-        loc_player = (x + self.cfg["party_red_bar"]["offset"][0],
-                      y + self.cfg["party_red_bar"]["offset"][1])
+        loc_party_red_bar = (bx, by)
+        loc_player = (bx + self.cfg["party_red_bar"]["offset"][0],
+                      by + self.cfg["party_red_bar"]["offset"][1])
 
         # visualize for debug
         draw_rectangle(self.img_frame_debug, loc_party_red_bar,
-                    (h, w), (0, 255, 0), "party red bar", thickness=1, text_height=0.4)
+                    (bh, bw), (0, 255, 0), "party red bar", thickness=1, text_height=0.4)
 
         return loc_player, loc_party_red_bar
 
@@ -1234,9 +1393,16 @@ class MapleStoryAutoBot:
         ensure_is_in_party
 
         Press the ``party`` hotkey to open the party window, then try to click
-        the "Create Party" button if it is visible.  If a game frame is not
-        available (e.g. wrong window size, capture not ready yet) the whole
-        step is skipped with a warning instead of crashing the bot thread.
+        the "Create Party" button if it is visible.
+
+        Robustness notes:
+          * If the "create" button is not found, instead of blindly assuming
+            "we're already in party" (the old behaviour that silently masked
+            missing-party-red-bar bugs), we additionally try to look for the
+            **disabled** state of the same button — if neither is found we
+            print a diagnostic warning so users can either create a party
+            manually, adjust the create_party_button_thres, or provide a
+            region-correct button template under ``misc/``.
         '''
         # open party window
         press_key(self.cfg["key"]["party"])
@@ -1257,25 +1423,70 @@ class MapleStoryAutoBot:
             press_key(self.cfg["key"]["party"])
             return
 
-        # Find the 'create party' button
-        loc_enable, score_enable, _ = find_pattern_sqdiff(
-                        self.img_frame, self.img_create_party_enable)
-
         lang = self.cfg["system"]["language"]
         thres = self.cfg['party_red_bar'][f'create_party_button_{lang}_thres']
-        if score_enable < thres:
-            logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
+
+        # Find the 'create party' button (both states: enabled + disabled)
+        loc_enable, score_enable, _ = find_pattern_sqdiff(
+                        self.img_frame, self.img_create_party_enable)
+        loc_disable, score_disable, _ = find_pattern_sqdiff(
+                        self.img_frame, self.img_create_party_disable)
+        found_enable  = score_enable  < thres
+        found_disable = score_disable < thres
+
+        if found_enable and score_enable <= score_disable:
+            logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)}), creating party...")
             h, w = self.img_create_party_enable.shape[:2]
             click_in_game_window(self.capture.window_title,
                 (loc_enable[0] + w // 2,
                  loc_enable[1] + h // 2 + self.cfg['game_window']['title_bar_height'])
             )
+            # Give the server ~1.2 s to respond and create the party red bar.
+            # It's OK if we slightly delay startup; without this sleep the
+            # very next frame often runs red-bar detection before the bar
+            # was actually rendered on the client.
+            time.sleep(1.2)
+        elif found_disable:
+            logger.info(
+                f"[ensure_is_in_party] 'Create party' button looks disabled "
+                f"(score {round(score_disable, 2)}). Assuming the character "
+                "is already in a party; continuing."
+            )
         else:
-            logger.info("[ensure_is_in_party] Cannot find create party button."
-                        "Maybe player already in party.")
+            # Neither match → cannot definitively tell if we're in a party.
+            # Best-effort: try clicking at the enable location anyway (as a
+            # soft fallback) and emit a clear diagnostic pointing the user to
+            # manual party creation if the red bar still doesn't show up.
+            logger.warning(
+                "[ensure_is_in_party] Neither 'Create Party' button template "
+                f"matched.  enabled_template_score={round(score_enable, 3)} "
+                f"(threshold <{thres}), disabled_template_score="
+                f"{round(score_disable, 3)}.\n"
+                "  -> Likely cause: button template under misc/ is for a "
+                "different server / resolution, or language setting "
+                f"(system.language={lang!r}) does not match the client.\n"
+                "  -> Quick fix: PRESS THE PARTY HOTKEY MANUALY IN-GAME "
+                "('P' by default) and click 'Create Party' by hand.  Once "
+                "the party red HP bar appears above your character, the "
+                "bot will be able to locate you and start hunting on the "
+                "next restart."
+            )
+            # Fallback click-at-enable-location (harmless if there's nothing)
+            if score_enable < 0.25:
+                h, w = self.img_create_party_enable.shape[:2]
+                logger.info(
+                    "[ensure_is_in_party] Fallback: clicking near best "
+                    f"'create party' candidate (score {round(score_enable, 2)})."
+                )
+                click_in_game_window(self.capture.window_title,
+                    (loc_enable[0] + w // 2,
+                     loc_enable[1] + h // 2 + self.cfg['game_window']['title_bar_height'])
+                )
+                time.sleep(1.2)
 
         # close party window
         press_key(self.cfg["key"]["party"])
+        time.sleep(0.2)
 
     def channel_change(self):
         '''
@@ -1669,13 +1880,66 @@ class MapleStoryAutoBot:
         #################################
         ### Player Location Detection ###
         #################################
-        # Get player location in game window
-        if self.cfg["nametag"]["enable"]:
-            loc_player = self.get_player_location_by_nametag()
-        else:
-            loc_player, loc_party_red_bar = self.get_player_location_by_party_red_bar()
-            if loc_party_red_bar is not None:
-                self.loc_party_red_bar = loc_party_red_bar
+        #
+        # NOTE: the two sub-steps below are ordered carefully.
+        # Step A computes ``loc_player_minimap`` (yellow player dot on the
+        # top-left minimap).  Step B then runs a THREE-STAGE cascade to find
+        # the player on-screen.  Stage 3 of the cascade (camera-center
+        # fallback) is ONLY permitted if we actually SEE a valid minimap
+        # player-dot in Step A — that way we never fabricate a player screen
+        # location when both the visual HW capture *and* the minimap are
+        # returning garbage (e.g. login screen, lost HWND, ...).
+
+        # ---- (A) Minimap player dot (run FIRST so cascade Stage 3 can use it)
+        loc_player_minimap = get_player_location_on_minimap(
+                                self.img_minimap,
+                                minimap_player_color=self.cfg["minimap"]["player_color"])
+        if loc_player_minimap:
+            self.loc_player_minimap = loc_player_minimap
+
+        # Also refresh "other players on minimap" dot list (used later by
+        # channel-change and PvP logic).
+        loc_other_players = get_all_other_player_locations_on_minimap(
+                                self.img_minimap,
+                                self.cfg['minimap']['other_player_color'])
+
+        # ---- (B) On-screen player location (3-stage cascade)
+        # New: always run the cascade; Stage 2 (nametag) auto-activates when
+        # Stage 1 (party red bar) fails, and Stage 3 (camera-center) acts as
+        # the final guardrail.  This removes the brittle if/else that forced
+        # CN/怀旧服 users to "opt in" before the bot could locate them.
+        loc_player, loc_party_red_bar, method_used = \
+            self._detect_player_location_cascade()
+        if loc_party_red_bar is not None:
+            self.loc_party_red_bar = loc_party_red_bar
+
+        # Print the method used once per startup (and whenever it changes) so
+        # the user can tell at a glance why the bot is / isn't stuck.
+        last_method = getattr(self, "_last_loc_method", None)
+        if last_method != method_used:
+            self._last_loc_method = method_used
+            if method_used == "camera_center_fallback":
+                logger.warning(
+                    "[Player Location] Falling back to CAMERA CENTER (no "
+                    "red-bar or nametag template matched your client).  The "
+                    "bot should now move but hunting accuracy will be "
+                    "reduced.  Fix: make a nametag template for your "
+                    "character's name (see usage notes)."
+                )
+            elif method_used in ("nametag", "nametag_auto_fallback"):
+                logger.info(
+                    f"[Player Location] Using nametag detection "
+                    f"({method_used})."
+                )
+            elif method_used == "party_red_bar":
+                logger.info("[Player Location] Using party red-bar detection.")
+            else:
+                logger.warning(
+                    f"[Player Location] All detection stages failed "
+                    f"(method={method_used}); keeping last known position.  "
+                    "Stuck watchdog will keep firing until at least one "
+                    "stage succeeds."
+                )
 
         # Update player location
         if loc_player is not None:
@@ -1692,23 +1956,24 @@ class MapleStoryAutoBot:
             # Update player location
             self.loc_player = loc_player
 
-        # Draw player center for debugging
+        # Draw player center for debugging, plus the detection method used
         cv2.circle(self.img_frame_debug,
                 self.loc_player, radius=3,
                 color=(0, 0, 255), thickness=-1)
+        # Label method used (top-left corner, under minimap / HP bar text)
+        method_color = {
+            "party_red_bar":         (0,   255, 0),
+            "nametag":               (0,   255, 255),
+            "nametag_auto_fallback": (0,   200, 255),
+            "camera_center_fallback": (0,  220, 255),
+            "all_stages_failed":     (0,   0,   255),
+            "none":                  (128, 128, 128),
+        }.get(method_used, (200, 200, 200))
+        cv2.putText(self.img_frame_debug,
+                    f"LOC: {method_used}",
+                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, method_color, 2)
 
-        # Get player location on minimap
-        loc_player_minimap = get_player_location_on_minimap(
-                                self.img_minimap,
-                                minimap_player_color=self.cfg["minimap"]["player_color"])
-        if loc_player_minimap:
-            self.loc_player_minimap = loc_player_minimap
-
-        # Get other player location on minimap
-        loc_other_players = get_all_other_player_locations_on_minimap(
-                                self.img_minimap,
-                                self.cfg['minimap']['other_player_color'])
-        # Debug
+        # Debug (minimap color analysis — kept from upstream)
         # if self.is_first_frame:
         #     logger.info("Running minimap color analysis...")
         #     debug_minimap_colors(self.img_minimap, other_player_color)

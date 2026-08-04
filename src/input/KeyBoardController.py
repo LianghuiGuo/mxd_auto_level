@@ -65,6 +65,23 @@ def press_key(key, duration=0.05):
 class KeyBoardController():
     '''
     KeyBoardController
+
+    The controller owns two window-title identifiers:
+
+    ``cfg_token``
+      - The token loaded from the YAML config (``cfg["game_window"]["title"]``).
+        May be a substring like ``"MapleStory Worlds"`` or a list of tokens.
+
+    ``window_title`` (the legacy attribute, now holds the **resolved exact
+    window title**)
+      - Populated later by ``set_window_title(...)`` once
+        ``GameWindowCapturor`` has successfully enumerated the exact title
+        (e.g. ``"冒险岛怀旧服"``, a value that is NOT predictable from the
+        YAML token when the user has a CN/TW/KR client).
+
+    Both identifiers are tried during ``is_game_window_active`` /
+    ``ensure_game_window_active`` so either exact-match or substring-match
+    will correctly identify the game client.
     '''
     def __init__(self, cfg):
         self.cfg = cfg
@@ -73,7 +90,16 @@ class KeyBoardController():
         self.cmd_left_right = "none"
         self.cmd_up_down_last = ""
         self.cmd_left_right_last = ""
-        self.window_title = cfg["game_window"]["title"]
+
+        # Keep the original YAML token(s) for substring matching later.
+        # It's important that this preserves the *original* list/tuple/str
+        # shape because the rest of the code expects string containment.
+        _tok = cfg["game_window"]["title"]
+        self.cfg_tokens = list(_tok) if isinstance(_tok, (list, tuple)) else [_tok]
+        # window_title starts as the first token; it is *overwritten* with
+        # the exact window-title string once GameWindowCapturor finds it.
+        self.window_title = self.cfg_tokens[0] if self.cfg_tokens else ""
+
         self.fps = 0 # Frame per seconds
         # Timer
         self.t_last_up = 0.0
@@ -117,6 +143,46 @@ class KeyBoardController():
 
         logger.info("[KeyBoardController] Init done")
 
+    def set_window_title(self, exact_title: str):
+        '''
+        Called after ``GameWindowCapturor`` successfully resolves the exact
+        foreground-window title (e.g. ``"冒险岛怀旧服"``) so the keyboard
+        controller can match against it exactly (and fall back to substring
+        tokens as well).
+
+        Logs the update on first change so users can verify the link between
+        the capture thread and this controller.
+        '''
+        if not exact_title or exact_title == self.window_title:
+            return
+        old_title = self.window_title
+        self.window_title = exact_title
+        # Prepend exact title to cfg_tokens so exact-match wins first (and
+        # duplicates are removed downstream).
+        new_tokens = [exact_title] + [t for t in self.cfg_tokens if t != exact_title]
+        self.cfg_tokens = new_tokens
+        logger.info(
+            f"[KeyBoardController] window title updated: {old_title!r} -> "
+            f"{exact_title!r}; search tokens = {self.cfg_tokens!r}"
+        )
+
+    def _title_matches(self, candidate: str) -> bool:
+        '''
+        Return True if ``candidate`` matches one of the configured tokens
+        (substring case-insensitive) or equals the exact resolved title.
+        '''
+        if not candidate:
+            return False
+        low = candidate.lower()
+        for token in self.cfg_tokens:
+            if not token:
+                continue
+            if token == candidate:            # exact match
+                return True
+            if token.lower() in low:          # substring match (case-insensitive)
+                return True
+        return False
+
     def toggle_enable(self):
         '''
         toggle_enable
@@ -149,9 +215,14 @@ class KeyBoardController():
         '''
         Check if the game window is currently the active (foreground) window.
 
-        Returns:
-        - True
-        - False
+        Matching is performed against every token in ``self.cfg_tokens`` using
+        **exact equality or case-insensitive substring match** via
+        ``_title_matches``.  This avoids false negatives when the resolved
+        exact title (e.g. ``"冒险岛怀旧服"``) is different from the YAML
+        substring token (e.g. ``"MapleStory Worlds"``).
+
+        Returns a tuple ``(is_active, active_window_title_or_None)`` so the
+        caller can log what was actually in front when this check failed.
         '''
         if is_mac():
             active_window = Quartz.CGWindowListCopyWindowInfo(
@@ -160,17 +231,101 @@ class KeyBoardController():
             )
             for window in active_window:
                 window_name = window.get(Quartz.kCGWindowName, '')
-                if window_name and self.window_title in window_name:
-                    return True
-            return False
+                if window_name and self._title_matches(window_name):
+                    return True, window_name
+            return False, None
         else:
             try:
                 active_window = gw.getActiveWindow()
                 if not active_window:
-                    return False
-                return self.window_title in active_window.title
-            except Exception as e:
-                return False
+                    return False, "<none>"
+                title = getattr(active_window, "title", "") or ""
+                if title and self._title_matches(title):
+                    return True, title
+                return False, title
+            except Exception:
+                return False, "<exception>"
+
+    def ensure_game_window_active(self):
+        '''
+        Best-effort foreground activation of the game window.
+
+        Tries, in order:
+          1. If already active, return True immediately.
+          2. pygetwindow.activate() on every window whose title matches a
+             known token (exact match or substring via ``_title_matches``,
+             not just the single exact ``window_title`` attribute).
+          3. win32gui.FindWindow with the exact resolved title; if that
+             returns 0, fall back to an EnumWindows scan using the same
+             multi-token matcher to locate the HWND even when the exact
+             window-title string differs from the configured token.
+          4. For any HWND found: if iconic, SW_RESTORE; then
+             SetForegroundWindow.
+
+        Returns True if the game became active, False otherwise.
+        '''
+        is_active, _ = self.is_game_window_active()
+        if is_active:
+            return True
+
+        # --- Stage 1: pygetwindow, matched via all tokens -------------------
+        try:
+            all_wins = gw.getAllWindows() or []
+            for w in all_wins:
+                t = getattr(w, "title", "") or ""
+                if self._title_matches(t):
+                    try:
+                        w.activate()
+                        time.sleep(0.05)
+                        if self.is_game_window_active()[0]:
+                            return True
+                    except Exception:
+                        # pygetwindow raises for weird HWNDs; keep going.
+                        pass
+        except Exception:
+            pass
+
+        # --- Stage 2: win32gui EnumWindows fallback ------------------------
+        try:
+            import win32gui  # already a project dependency, imported lazily
+            import win32con
+        except Exception:
+            return False
+
+        def _find_hwnd_via_tokens():
+            found_hwnd = [0]
+            def cb(hwnd, _):
+                try:
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    t = win32gui.GetWindowText(hwnd)
+                    if self._title_matches(t):
+                        found_hwnd[0] = hwnd
+                except Exception:
+                    pass
+            try:
+                win32gui.EnumWindows(cb, None)
+            except Exception:
+                pass
+            return found_hwnd[0]
+
+        hwnd = 0
+        try:
+            if self.window_title:
+                hwnd = win32gui.FindWindow(None, self.window_title)
+            if hwnd == 0:
+                # Exact title FindWindow failed (usual case when the exact
+                # title hasn't been propagated yet); scan all windows.
+                hwnd = _find_hwnd_via_tokens()
+            if hwnd != 0:
+                if win32gui.IsIconic(hwnd):
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(hwnd)
+                time.sleep(0.05)
+                return self.is_game_window_active()[0]
+        except Exception:
+            pass
+        return False
 
     def release_all_key(self):
         '''
@@ -202,18 +357,57 @@ class KeyBoardController():
         '''
         run
         '''
+        # Rate-limited logging helpers so the log window doesn't flood.
+        t_next_focus_warn = 0.0
+        t_first_action_banner = True
+
+        def do_action_key(kind, key):
+            nonlocal t_first_action_banner
+            if t_first_action_banner:
+                # Print a one-time banner so users can tell that the
+                # controller is actually dispatching keys (not just looping).
+                is_active, foreground = self.is_game_window_active()
+                logger.info(
+                    "[KeyBoardController] Sending first action to game. "
+                    f"active={is_active}, foreground_window={foreground!r}, "
+                    f"window_title_token={self.window_title!r}"
+                )
+                t_first_action_banner = False
+            press_key(key)
+
         while not self.is_terminated:
-            # Check if game window is active
-            if not self.is_enable or not self.is_game_window_active():
+            # --- Preconditions -------------------------------------------------
+            if not self.is_enable:
                 self.limit_fps()
                 continue
+
+            # Ensure game window stays in the foreground (PyAutoGUI sends to
+            # the foreground window globally; if the user clicks the Qt UI
+            # all subsequent presses are lost).
+            is_active, active_title = self.is_game_window_active()
+            if not is_active:
+                activated = self.ensure_game_window_active()
+                if not activated:
+                    # Only complain at ~0.5 Hz so the log stays readable.
+                    now = time.time()
+                    if now >= t_next_focus_warn:
+                        t_next_focus_warn = now + 2.0
+                        logger.warning(
+                            "[KeyBoardController] Game window is not in the "
+                            f"foreground and couldn't be activated.  Expected "
+                            f"title containing {self.window_title!r}; current "
+                            f"front window is {active_title!r}.  Keys are "
+                            "HALTED until the game window regains focus."
+                        )
+                    self.limit_fps()
+                    continue
 
             # Buff skill
             for i, buff_skill_key in enumerate(self.cfg["buff_skill"]["keys"]):
                 cooldown = self.cfg["buff_skill"]["cooldown"][i]
                 if time.time() - self.t_last_buff_cast[i] >= cooldown and \
                     time.time() - self.t_last_skill > self.cfg["buff_skill"]["action_cooldown"]:
-                    press_key(buff_skill_key)
+                    do_action_key("buff", buff_skill_key)
                     logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)")
                     # Reset timers
                     self.t_last_buff_cast[i] = time.time()
@@ -270,17 +464,17 @@ class KeyBoardController():
             ### Action Command ###
             ######################
             if self.cmd_action == "jump":
-                press_key(self.cfg["key"]["jump"])
+                do_action_key("jump", self.cfg["key"]["jump"])
             elif self.cmd_action == "teleport":
-                press_key(self.cfg["key"]["teleport"])
+                do_action_key("teleport", self.cfg["key"]["teleport"])
             elif self.cmd_action == "attack":
-                press_key(self.attack_key)
+                do_action_key("attack", self.attack_key)
                 self.t_last_skill = time.time()
             elif self.cmd_action == "add_hp":
-                press_key(self.cfg["key"]["add_hp"])
+                do_action_key("add_hp", self.cfg["key"]["add_hp"])
                 self.cmd_action = "none"  # Reset command
             elif self.cmd_action == "add_mp":
-                press_key(self.cfg["key"]["add_mp"])
+                do_action_key("add_mp", self.cfg["key"]["add_mp"])
                 self.cmd_action = "none"  # Reset command
             elif self.cmd_action == "goal":
                 pass
