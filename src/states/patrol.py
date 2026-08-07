@@ -20,6 +20,22 @@ class PatrolState(State):
         return None
 
     def on_frame(self):
+        # 1 Hz heartbeat
+        try:
+            from src.utils.logger import logger
+            _now = time.time()
+            _last = getattr(type(self), "_last_on_frame_log", -999.0)
+            if _now - _last >= 1.0:
+                type(self)._last_on_frame_log = _now
+                logger.info(
+                    "[FSM] PatrolState.on_frame fired. "
+                    f"loc_player={self.bot.loc_player} "
+                    f"cmd=({self.bot.cmd_move_x},{self.bot.cmd_move_y},"
+                    f"{self.bot.cmd_action})"
+                )
+        except Exception:
+            pass
+
         x, y = self.bot.loc_player
         h, w = self.bot.img_frame.shape[:2]
         loc_player_ratio = float(x)/float(w)
@@ -42,7 +58,9 @@ class PatrolState(State):
             self.bot.cmd_move_x = "right"
 
         # Update attack commend by detecting mobs near players
-        self.bot.update_cmd_by_mob_detection()
+        # (hoisted to run_once; only call here in legacy/non-run_once callers).
+        if not getattr(self.bot, "_mob_detection_ran_this_frame", False):
+            self.bot.update_cmd_by_mob_detection()
 
         # Update attack commend by periodically attack
         if time.time() - self.bot.t_last_attack > \

@@ -74,7 +74,22 @@ class GameWindowCapturor:
         else:
             logger.info(f"[GameWindowCapturor] Found game window title: {self.window_title!r}")
 
-        resize_window(self.window_title, width=1296, height=759)
+        # Also resolve the HWND now so downstream code (KeyBoardController's
+        # PostMessage backend, GameWindowCapturor's own future helpers) can
+        # target the window directly without re-enumerating every time.
+        self.window_hwnd = 0
+        try:
+            import win32gui  # already a project dependency (see common.py)
+            self.window_hwnd = int(win32gui.FindWindow(None, self.window_title))
+        except Exception:
+            self.window_hwnd = 0
+        if self.window_hwnd != 0:
+            logger.info(
+                f"[GameWindowCapturor] Resolved HWND {hex(self.window_hwnd)} "
+                f"for {self.window_title!r}"
+            )
+
+        resize_window(self.window_title, width=1296, height=759, hwnd=self.window_hwnd or None)
 
         # Create capture handler
         self.capture = WindowsCapture(window_name=self.window_title)

@@ -463,34 +463,97 @@ def get_minimap_loc_size(img_frame):
     # logger.warning("Minimap not found in the game frame.")
     return None  # minimap not found
 
-def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 255)):
+def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 255),
+                                    debug_label="player"):
     """
     Detects the player's position on the minimap.
 
     The function works by:
-    - Creating a binary mask of all pixels in the minimap that match the configured
-    player color exactly.
-    - Verifying that at least 4 matching pixels are found (to avoid false positives).
-    - Computing the average of these pixel coordinates to determine the center of
-    the player icon on the minimap.
+      * Iterating over a sequence of **per-channel tolerances** (10 → 20 →
+        40 → 60) so the player dot is found even if windows-capture
+        introduces subtle BGR channel shifts (very common when the client
+        runs in 16:9 vs 4:3, or when the capture pipeline converts from
+        BGRA to BGR on the fly).
+      * For each tolerance, building an inRange mask and requiring at least
+        4 pixels to match (avoid single-pixel noise).
+      * Taking the pixel-wise centroid of all matched pixels as the final
+        minimap coordinate.
 
-    Returns:
-        (x, y): The player's location in minimap coordinates as a tuple.
-                Returns None if not enough matching pixels are found.
+    Parameters
+    ----------
+    img_minimap : ndarray
+        Cropped minimap image (BGR).
+    minimap_player_color : tuple[int, int, int]
+        Reference BGR colour for the player dot (default bright yellow
+        ``(136, 255, 255)``).
+    debug_label : str
+        Short label used only for the one-shot diagnostic log/dump when all
+        tolerances fail (helps disambiguate "player dot" vs "other-player
+        dot" in user reports).
+
+    Returns
+    -------
+    (x, y) | None
+        Player location in **minimap** coordinates (not game-screen coords)
+        or None when fewer than 4 pixels match all tried tolerances.
     """
-    mask = cv2.inRange(img_minimap,
-                        minimap_player_color,
-                        minimap_player_color)
-    coords = cv2.findNonZero(mask)
-    if coords is None or len(coords) < 4:
-        # logger.warning(f"Fail to locate player location on minimap.")
-        return None
+    tolerances = [10, 20, 40, 60]
+    ref_bgr = tuple(map(int, minimap_player_color))
+    last_mask = None
+    last_n = 0
+    for tol in tolerances:
+        lower_bgr = tuple(max(0, c - tol) for c in ref_bgr)
+        upper_bgr = tuple(min(255, c + tol) for c in ref_bgr)
+        mask = cv2.inRange(img_minimap, lower_bgr, upper_bgr)
+        n = int(cv2.countNonZero(mask))
+        coords = cv2.findNonZero(mask)
+        last_mask = mask
+        last_n = n
+        if coords is not None and len(coords) >= 4:
+            avg = coords.mean(axis=0)[0]
+            return (int(round(avg[0])), int(round(avg[1])))
 
-    # Calculate the average location of the matching pixels
-    avg = coords.mean(axis=0)[0]  # shape (1,2), so we take [0]
-    loc_player_minimap = (int(round(avg[0])), int(round(avg[1])))
+    # --- Diagnostic path: all tolerances failed. ---------------------------
+    # Dump the last (widest-tolerance) mask so the user can visualise what
+    # the detector sees and then correct ``minimap.player_color`` in YAML.
+    # We do this exactly once per process to avoid spam.
+    if not hasattr(get_player_location_on_minimap, "_dbg_dumped"):
+        get_player_location_on_minimap._dbg_dumped = True  # type: ignore[attr-defined]
+        try:
+            import os as _os
+            _os.makedirs("log", exist_ok=True)
+            fname = f"log/debug_minimap_{debug_label}_ref{ref_bgr[0]}_{ref_bgr[1]}_{ref_bgr[2]}.png"
+            cv2.imwrite(fname, last_mask)
+            # Also dump the raw minimap so colour can be eyeballed.
+            fname_raw = f"log/debug_minimap_{debug_label}_raw.png"
+            cv2.imwrite(fname_raw, img_minimap)
+            # Try to give a hint: if the mask captured anything at all (<4
+            # pixels) suggest the tolerance is too low; otherwise suggest
+            # that minimap.player_color BGR value is wrong.
+            if last_n > 0:
+                hint = (
+                    f"Found only {last_n} pixels (need ≥4) with the widest "
+                    f"tolerance ±{tolerances[-1]}.  Try increasing "
+                    "``minimap.player_color_tolerance`` in config or tuning "
+                    f"the BGR reference (current={ref_bgr})."
+                )
+            else:
+                hint = (
+                    "Zero pixels matched any tolerance — "
+                    f"``minimap.player_color`` (BGR {ref_bgr}) is almost "
+                    "certainly wrong for this client.  Use the debugging "
+                    "command to sample the *actual* player dot BGR from "
+                    "``log/debug_minimap_player_raw.png``."
+                )
+            logger.debug(
+                f"[get_player_location_on_minimap] Failed to locate "
+                f"{debug_label!r} dot.  {hint}  Mask & raw minimap saved to "
+                f"log/debug_minimap_{debug_label}_*.png."
+            )
+        except Exception:  # noqa: BLE001 — diagnostics must never crash caller
+            pass
 
-    return loc_player_minimap
+    return None
 
 def get_all_other_player_locations_on_minimap(img_minimap, red_bgr=(0, 0, 255)):
     '''
@@ -897,10 +960,11 @@ def normalize_pixel_coordinate(coord, window_size):
 
     return (norm_x, norm_y)
 
-def resize_window(window_title, width=1296, height=759):
+def resize_window(window_title, width=1296, height=759, hwnd=None):
     '''
-    Resize a top-level window identified by ``window_title`` (exact match) to
-    ``width`` x ``height``.
+    Resize a top-level window identified by ``window_title`` (exact match) or
+    by a caller-provided ``hwnd`` (Win32 HWND, takes precedence over
+    ``window_title`` when non-zero) to ``width`` x ``height``.
 
     Resilient behaviour:
       * If the window cannot be found, log a warning and return.
@@ -916,7 +980,17 @@ def resize_window(window_title, width=1296, height=759):
     Returns True if the window ended up at the requested size (either because
     it already was, or because MoveWindow succeeded); False otherwise.
     '''
-    hwnd = win32gui.FindWindow(None, window_title)
+    if hwnd is None or int(hwnd or 0) == 0:
+        hwnd = win32gui.FindWindow(None, window_title)
+    else:
+        hwnd = int(hwnd)
+        # Caller-provided HWND should still be a live window before we try to
+        # touch it; otherwise fall back to FindWindow by title for safety.
+        try:
+            if not win32gui.IsWindow(hwnd):
+                hwnd = win32gui.FindWindow(None, window_title)
+        except Exception:
+            hwnd = win32gui.FindWindow(None, window_title)
     if hwnd == 0:
         logger.warning(f"[resize_window] Cannot find exact-title window: {window_title!r}")
         return False

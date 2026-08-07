@@ -62,6 +62,19 @@ class MapleStoryAutoBot:
         self.video_writer = None # For video recording feature
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
+        # Party-red-bar anti-false-positive (FP) guards -------------------------------------------------
+        # Non-Artale / CN clients typically don't render the little above-character
+        # "party bar" that Stage 1 relies on, so the relaxed HSV+contour filter
+        # can lock on to STATIC UI red bars (top-right character panel HP bar,
+        # bottom HP gauge, red decoration pixels, etc.).  A detector box that
+        # never moves always fools the stuck watchdog into firing forever, so
+        # we keep a short position track and disable Stage 1 once convicted.
+        self._prb_track_frames   = []   # ring buffer of (prb_bar, prb_player) tuples
+        self._prb_track_len      = 12   # ~0.5–1 s at typical loop rates
+        self._prb_fp_suspected   = False
+        self._prb_fp_disabled    = False  # once True, Stage 1 is skipped for rest of run
+        self._prb_first_frame_t  = None   # time.time() of the very first Stage-1 "OK" frame
+        self._prb_dbg_fp_saved   = False  # only save the convicted FP mask/crop once
         self.thread_auto_bot = None # thread for running autobot
         self.cmd_move_x = "none" # "left" "right"
         self.cmd_move_y = "none" # "up" "down"
@@ -145,6 +158,88 @@ class MapleStoryAutoBot:
         self.image_debug_signal = image_debug_signal
         self.route_map_viz_signal = route_map_viz_signal
 
+    def _ensure_nametag_template_loaded(self, log_level="cascade"):
+        '''
+        Lazy helper that guarantees ``self.img_nametag`` and
+        ``self.img_nametag_gray`` are populated whenever the configured
+        nametag (``cfg["nametag"]["name"]``) differs from the one currently
+        loaded.
+
+        * At ``load_config`` time we call it so the user sees a clear
+          ``Loaded image: nametag/xxx.png`` message alongside the other
+          resource loads.
+        * At cascade-run time we call it so toggling ``enable`` or editing
+          ``name`` via the **Advanced Settings** UI does **not** require a
+          full restart — the next frame reloads the template.
+
+        Returns True if a valid nametag template is available after this
+        call, False otherwise.
+        '''
+        current_key = (
+            bool(self.cfg["nametag"].get("enable", False)),
+            str(self.cfg["nametag"].get("name", "") or ""),
+        )
+        enable_flag, name = current_key
+
+        # Short-circuit if nothing changed and we already have a template.
+        if getattr(self, "_last_nametag_cfg_key", None) == current_key and \
+           self.img_nametag is not None and \
+           self.img_nametag_gray is not None:
+            return True
+
+        # Always try to load if a real name is supplied, independent of the
+        # enable flag.  The cascade (Stage 2) will decide whether to *use*
+        # the result based on enable.  If name is "example" or empty we skip
+        # (no one ships a real "example" player-nametag template).
+        need_load = bool(name) and name != "example"
+        if not need_load:
+            self._last_nametag_cfg_key = current_key
+            return False
+
+        path_color = f"nametag/{name}.png"
+        import os as _os
+        file_exists = _os.path.isfile(path_color)
+        if not file_exists:
+            logger.error(
+                f"[_ensure_nametag_template_loaded] Nametag template file "
+                f"not found: {path_color!r}.  Expected a PNG at "
+                f"``nametag/{name}.png``.  Stage 2 (nametag) of the player "
+                "location cascade will be skipped until the file exists "
+                "and nametag.name matches the filename (without .png)."
+            )
+            self.img_nametag = None
+            self.img_nametag_gray = None
+            self._last_nametag_cfg_key = current_key
+            return False
+
+        img = load_image(path_color)
+        img_gray = load_image(path_color, cv2.IMREAD_GRAYSCALE)
+        if img is None or img_gray is None:
+            logger.error(
+                f"[_ensure_nametag_template_loaded] load_image returned "
+                f"None for {path_color!r} (corrupt / unsupported PNG?).  "
+                "Stage 2 (nametag) skipped."
+            )
+            self.img_nametag = None
+            self.img_nametag_gray = None
+            self._last_nametag_cfg_key = current_key
+            return False
+
+        self.img_nametag = img
+        self.img_nametag_gray = img_gray
+        self._last_nametag_cfg_key = current_key
+        if log_level == "init":
+            logger.info(
+                f"Loaded image: {path_color} (name={name!r}, "
+                f"enable={enable_flag}, shape={self.img_nametag.shape})"
+            )
+        else:
+            logger.info(
+                f"[player_cascade] (Re)loaded nametag template "
+                f"{path_color!r} (name={name!r}, enable={enable_flag})."
+            )
+        return True
+
     def load_config(self, cfg):
         '''
         load_config
@@ -201,11 +296,27 @@ class MapleStoryAutoBot:
                     # raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
             logger.info(f"Loaded monsters: {list(self.monsters_info.keys())}")
 
-        # Load player's name tag
-        if cfg["nametag"]["enable"]:
-            self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
-            self.img_nametag_gray = load_image(f"nametag/{cfg['nametag']['name']}.png",
-                                               cv2.IMREAD_GRAYSCALE)
+        # Re-resolve nametag template at every load_config call (the UI
+        # triggers this every time the user saves changes in the Advanced
+        # Settings tab) so the user does NOT need to restart AutoBot after
+        # editing nametag.name / nametag.enable.
+        #
+        # NOTE: This MUST happen after self.cfg is assigned (at the end of
+        # load_config) if we want to read cfg["nametag"]["name"] from the
+        # *new* config, not the previous one.  To keep the "Loaded image:"
+        # message in the same relative order as other assets, we pass the
+        # incoming ``cfg`` directly into the helper via a temporary swap.
+        _orig_cfg = getattr(self, "cfg", None)
+        try:
+            self.cfg = cfg
+            self._ensure_nametag_template_loaded(
+                log_level="cascade" if _orig_cfg is not None else "init"
+            )
+        finally:
+            # Restore (will be overwritten again below with the new cfg, so
+            # this block is just safety for early-return paths above).
+            if _orig_cfg is not None:
+                self.cfg = _orig_cfg
 
         # Load misc image
         lang = cfg["system"]["language"]
@@ -273,6 +384,17 @@ class MapleStoryAutoBot:
         #       HWND because the YAML token was not an exact title match.
         if getattr(self.capture, "window_title", None):
             self.kb.set_window_title(self.capture.window_title)
+        # Also propagate the resolved HWND (if any) from GameWindowCapturor
+        # to KeyBoardController so the PostMessage keyboard backend can fire
+        # WM_KEYDOWN/WM_KEYUP directly into the game's message queue,
+        # bypassing the low-level keyboard hook that many Chinese
+        # MapleStory anti-cheat shields attach to block SendInput.
+        _cap_hwnd = getattr(self.capture, "window_hwnd", 0) or 0
+        if _cap_hwnd != 0:
+            try:
+                self.kb.set_game_hwnd(_cap_hwnd)
+            except Exception:
+                pass
 
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, self.kb)
@@ -293,6 +415,65 @@ class MapleStoryAutoBot:
         self.t_last_attack = time.time()
         self.t_last_minimap_update = time.time()
         self.t_to_change_channel = time.time()
+
+        # Reset one-shot player-localisation flags so a Stop → Start cycle,
+        # a map change (load_config re-run), or a route-index switch do not
+        # keep stale diagnostics from a previous run.  If we don't clear
+        # these the synth/projection paths never re-emit their helpful
+        # hints and the "is this match good enough" gates stay poisoned.
+        self._prb_track_frames      = []
+        self._prb_fp_suspected      = False
+        self._prb_fp_disabled       = False
+        self._prb_first_frame_t     = None
+        self._prb_dbg_fp_saved      = False
+        self._prb_dbg_saved         = False
+        self._minimap_global_synth  = False
+        self._mm_global_synth_warned        = False
+        self._loc_player_mm_proj_warned     = False
+        self._cc_fallback_no_mm_warned      = False
+        self._route_color_fallback_logged_at = -99999.0
+        self._route_empty_patrol_logged_at   = -99999.0
+        self._route_cmd_dbg_logged_at        = -99999.0
+        self._last_loc_method       = None
+        # Mob-detection + viz state.
+        # _last_mob_full_counters keeps the most recent snapshot of BOX/FULL/GRAYSCALE
+        # counts produced by update_cmd_by_mob_detection.  It is read by
+        # update_info_on_img_frame_debug (to paint the DETECT[...] status line +
+        # 1 Hz DETECTOR_VIZ log line) even on frames where update_cmd_by_mob_detection
+        # is skipped (e.g. very old state or first frame).  Initialise here rather than
+        # lazily so the viz layer never raises AttributeError/KeyError before
+        # the detector has run once.
+        self._last_mob_full_counters = {"box": -1,
+                                       "full": -1,
+                                       "grayscale": -1,
+                                       "used_fb": False,
+                                       "mode": "?",
+                                       "box_wh": (None, None),
+                                       "player": (0, 0),
+                                       "nearest": None,
+                                       "attack_dir": None,
+                                       "cmd_action_now": None}
+        # run_once sets this to True immediately after calling
+        # update_cmd_by_mob_detection; the Hunting/Patrol/FindingRune state
+        # handlers use it to avoid calling the detector a second time this frame.
+        self._mob_detection_ran_this_frame = False
+        # Nametag-anti-FP trackers.  CN clients often render the character's
+        # own name TWICE: once above the character's head (the one we want)
+        # and once in the top-right info panel in big bold red letters.
+        # Because the text/font/colour is identical, template matching
+        # usually picks the UI one (larger, sharper, fixed position) which
+        # makes the tracker think the player never moves → stuck forever.
+        self._nt_track_frames       = []
+        self._nt_track_len          = 12
+        self._nt_fp_disabled        = False
+        self._nt_first_frame_t      = None
+        self._nt_dbg_fp_saved       = False
+        # Emergency motion fallback.  When both the route tracker AND the
+        # random-stuck-rescue fail to produce a non-none move command for a
+        # continuous window, we drop into a very simple left/right patrol
+        # loop so at least the character walks around and attracts mobs.
+        self._patrol_dir_toggled_at = time.time()
+        self._patrol_current        = "right"  # left ↔ right alternator
 
         # Set init state
         if self.args.init_state != "":
@@ -398,11 +579,20 @@ class MapleStoryAutoBot:
         forever on non-Artale clients.
 
         Stage 1 — party red bar (Artale default; best accuracy).
-        Stage 2 — name tag (configured explicitly or auto-tried on failure).
-        Stage 3 — camera-center approximation (cheap, coarse, keeps watchdog
-                  happy when both 1 & 2 fail).  Only kicks in when a minimap
-                  player-dot is also visible, so we never fabricate a location
-                  if we can't even see the minimap.
+        Stage 2 — name tag: template matching against the character-name
+                   image under ``nametag/<name>.png``.  Lazy-reloaded here
+                   every frame so changes made in **Advanced Settings**
+                   (``nametag.enable`` / ``nametag.name``) take effect
+                   WITHOUT restarting the process.
+        Stage 3 — camera-center approximation: cheap, coarse, keeps the
+                   watchdog happy when 1 & 2 both fail.  Condition is
+                   "``self.img_frame`` has valid content" — if the capture
+                   pipeline is delivering frames we assume the camera is
+                   still roughly centered on the character (standard
+                   side-scroller behaviour).  Old code additionally gated on
+                   minimap-dot visibility; the new tolerant
+                   ``get_player_location_on_minimap`` makes that mostly
+                   redundant, but we still prefer it if present.
 
         Returns ``(loc_player, loc_party_red_bar, method_used)``.
         ``method_used`` is a short tag for the debug viz/logs.
@@ -410,19 +600,31 @@ class MapleStoryAutoBot:
         method_used = "none"
 
         # --- Stage 1: party red bar ------------------------------------------
-        prb_player, prb_bar = self.get_player_location_by_party_red_bar()
+        # If the anti-FP tracker convicted Stage 1 of matching a static UI
+        # element (top-right HP bar / red decoration) we skip it entirely for
+        # the rest of this run — otherwise we end up stuck on a stale
+        # ``loc_player`` that never moves, which keeps the watchdog firing
+        # forever (the exact failure the user is seeing).
+        prb_player, prb_bar = None, None
+        if not self._prb_fp_disabled:
+            prb_player, prb_bar = self.get_player_location_by_party_red_bar()
         if prb_player is not None and prb_bar is not None:
             return prb_player, prb_bar, "party_red_bar"
 
         # --- Stage 2: nametag ------------------------------------------------
-        # Run even when ``nametag.enable`` is False — on CN/non-Artale clients
-        # the red bar is top-right and Stage 1 always fails, so we silently
-        # fall back to the nametag pipeline.  If the user hasn't supplied a
-        # custom nametag template yet (name == "example") the match will
-        # still fail, but that's fine — we just move to Stage 3.
-        nt_ok = self.cfg["nametag"]["enable"] or True
+        # Lazy-resolve: if the user changed nametag.enable or nametag.name
+        # via the UI since the last frame, reload the template RIGHT NOW so
+        # they don't need to click "restart bot" (or even close the UI).
+        self._ensure_nametag_template_loaded(log_level="cascade")
+
+        # Run even when ``nametag.enable`` is False — on CN/non-Artale
+        # clients the red bar is top-right and Stage 1 always fails, so we
+        # silently fall back to the nametag pipeline.  ``enable`` gate is
+        # soft: if False we still run once (so the user can preview) but in
+        # future the flag could toggle a strict enforcement.
         nt_player = None
-        if nt_ok and getattr(self, "img_nametag", None) is not None and \
+        if self.img_nametag is not None and \
+           self.img_nametag_gray is not None and \
            self.cfg["nametag"]["name"] != "example":
             try:
                 nt_player = self.get_player_location_by_nametag()
@@ -433,22 +635,117 @@ class MapleStoryAutoBot:
             method_used = "nametag" if self.cfg["nametag"]["enable"] else "nametag_auto_fallback"
             return nt_player, prb_bar, method_used
 
-        # --- Stage 3: camera-center + minimap player-dot guard ---------------
-        # Only estimate camera-center position if we actually see a player
-        # dot on the minimap (i.e. the capture pipeline is working and we
-        # can plausibly believe the camera is still centered on the
-        # character).  Otherwise return None and let the caller decide.
-        if self.loc_player_minimap is not None and \
-           self.loc_player_minimap != (0, 0):
+        # --- Stage 3: camera-center fallback --------------------------------
+        # Primary gate: is the frame capture actually yielding real pixels?
+        img_frame_ok = (getattr(self, "img_frame", None) is not None and
+                        self.img_frame.size > 0)
+
+        # Helper: minimap-dot visibility (soft gate; if not there the frame
+        # gate is still authoritative for camera-center fallback).
+        mm_dot_ok = (getattr(self, "loc_player_minimap", None) is not None and
+                     self.loc_player_minimap != (0, 0))
+
+        if img_frame_ok:
+            if not mm_dot_ok and not getattr(self, "_cc_fallback_no_mm_warned", False):
+                self._cc_fallback_no_mm_warned = True
+                logger.debug(
+                    "[player_cascade] Using camera-center fallback without "
+                    "a visible minimap player dot.  Capture pipeline is OK "
+                    "but minimap-dot colour may be calibrated to the wrong "
+                    "BGR value for this client; inspect log/debug_minimap_"
+                    "player_raw.png if navigation accuracy is poor."
+                )
             cam_player, _tag = self.get_player_location_camera_center_fallback()
             return cam_player, prb_bar, "camera_center_fallback"
 
-        # All stages failed.  Upstream keeps the last known loc_player.
+        # All stages failed (img_frame is None too = probably login screen,
+        # lost HWND, or misconfigured window-capture parameters).
         return None, prb_bar, method_used or "all_stages_failed"
+
+    def _is_nametag_false_positive(self, loc_nametag_abs, loc_player_abs):
+        '''
+        Decide whether a good-score nametag match is actually a STATIC UI
+        panel element (CN clients render the character's own name in the
+        top-right info panel using the exact same font/colour as the
+        above-head nametag).
+
+        Heuristics:
+          (a) Geometry — reject if outside playfield (right 36% / bottom 20%).
+          (b) Temporal — if position moved < 3 px across last 12 frames it
+              is almost certainly a static UI element.
+
+        Returns True when convicted as UI false-positive.
+        '''
+        if loc_nametag_abs is None or loc_player_abs is None:
+            return True
+        W, H = WINDOW_WORKING_SIZE
+        nx, ny = loc_nametag_abs
+        PLAY_Y_LO  = int(H * 0.06)
+        PLAY_Y_HI  = int(H * 0.80)
+        PLAY_X_LO  = int(W * 0.14)
+        PLAY_X_HI  = int(W * 0.64)
+        geom_violation = not (PLAY_X_LO <= nx <= PLAY_X_HI and
+                              PLAY_Y_LO <= ny <= PLAY_Y_HI)
+
+        self._nt_track_frames.append((loc_nametag_abs, loc_player_abs))
+        if len(self._nt_track_frames) > self._nt_track_len:
+            self._nt_track_frames.pop(0)
+        if self._nt_first_frame_t is None:
+            self._nt_first_frame_t = time.time()
+
+        temp_violation = False
+        if len(self._nt_track_frames) == self._nt_track_len:
+            nt0_x, nt0_y = self._nt_track_frames[0][0]
+            ntN_x, ntN_y = self._nt_track_frames[-1][0]
+            pl0_x, pl0_y = self._nt_track_frames[0][1]
+            plN_x, plN_y = self._nt_track_frames[-1][1]
+            nt_disp  = abs(ntN_x - nt0_x) + abs(ntN_y - nt0_y)
+            pl_disp  = abs(plN_x - pl0_x) + abs(plN_y - pl0_y)
+            if nt_disp < 3 and pl_disp < 3:
+                warmup_s = time.time() - self._nt_first_frame_t
+                if warmup_s > 4.0:
+                    temp_violation = True
+
+        is_fp = geom_violation or temp_violation
+        if is_fp and not self._nt_dbg_fp_saved and len(self._nt_track_frames) >= 4:
+            self._nt_dbg_fp_saved = True
+            try:
+                pad = 60
+                cx0 = max(0, nx - pad)
+                cy0 = max(0, ny - pad)
+                cx1 = min(W, nx + self.img_nametag.shape[1] + pad)
+                cy1 = min(H, ny + self.img_nametag.shape[0] + pad)
+                if hasattr(self, "img_frame") and self.img_frame is not None:
+                    crop = self.img_frame[cy0:cy1, cx0:cx1].copy()
+                    rbx, rby = nx - cx0, ny - cy0
+                    cv2.rectangle(crop, (rbx, rby),
+                                  (rbx + self.img_nametag.shape[1],
+                                   rby + self.img_nametag.shape[0]),
+                                  (0, 0, 255), 2)
+                    cv2.imwrite("log/debug_nametag_fp_crop.png", crop)
+                    cv2.imwrite("log/debug_nametag_fp_full.png", self.img_frame)
+            except Exception:
+                pass
+            why = []
+            if geom_violation: why.append(f"geom(nametag@({nx},{ny}))")
+            if temp_violation: why.append("static(12f<3px)")
+            _why = " + ".join(why) if why else "unknown"
+            logger.warning(
+                f"[Stage2 nametag] CONVICTED false-positive ({_why}). "
+                "Falling back to Stage 3 (camera center).  "
+                "Diagnostic crop saved to log/debug_nametag_fp_*.png."
+            )
+        if is_fp and len(self._nt_track_frames) >= self._nt_track_len * 2:
+            self._nt_fp_disabled = True
+        return is_fp
 
     def get_player_location_by_nametag(self):
         '''
         Detects the player's location based on the nametag position in the game window.
+        ROOT-BUG FIXES (see task #1):
+          (1) score >= diff_thres returns None instead of reusing stale loc_nametag.
+          (2) cropped-ROI match result now correctly adds back CROP_DX/CROP_DY.
+          (3) After good score, runs _is_nametag_false_positive temporal filter.
 
         This function works by:
         - Extracting a vertical region of interest (ROI) where the nametag is expected.
@@ -460,10 +757,22 @@ class MapleStoryAutoBot:
 
         Returns:
             loc_player (tuple): The (x, y) coordinates of the player's estimated location.
+                Returns ``None`` if convicted as UI-panel false-positive.
         '''
+        # CN 怀旧服: pre-crop to PLAYFIELD (exclude top-right status panel,
+        # top 10% chrome, left 14% chat/minimap, bottom 20% HP/EXP bar area)
+        # so the template-match cannot accidentally lock onto the static
+        # character-info panel name.
+        H_full, W_full = self.img_frame_gray.shape[:2]
+        ui_y_start     = int(self.cfg["ui_coords"]["ui_y_start"])
+        PFX_X_LO = int(W_full * 0.14)
+        PFX_X_HI = int(W_full * 0.64)
+        PFX_Y_LO = int(H_full * 0.10)
+        PFX_Y_HI = max(PFX_Y_LO + 64, ui_y_start - int(H_full * 0.20))
+        CROP_DX, CROP_DY = PFX_X_LO, PFX_Y_LO
+
         # Get camera region in the game window
-        img_camera = self.img_frame_gray[
-            :self.cfg["ui_coords"]["ui_y_start"], :]
+        img_camera = self.img_frame_gray[PFX_Y_LO:PFX_Y_HI, PFX_X_LO:PFX_X_HI].copy()
 
         # Get nametag image and search image
         if self.cfg["nametag"]["mode"] == "white_mask":
@@ -486,9 +795,19 @@ class MapleStoryAutoBot:
             _, img_roi = cv2.threshold(img_camera_eq, 150, 255, cv2.THRESH_BINARY)
         else:
             logger.error(f"Unsupported nametag detection mode: {self.cfg['nametag']['mode']}")
-            return
-        # cv2.imshow("img_roi", img_roi)
-        # cv2.imshow("img_nametag", img_nametag)
+            return None
+
+        # If anti-FP tracker has already convicted Stage 2, skip all work and
+        # let the cascade go straight to Stage 3 (camera center fallback).
+        if getattr(self, "_nt_fp_disabled", False):
+            return None
+
+        # Guard: if nametag template is larger than the (already-cropped)
+        # search region, matching is impossible.
+        th, tw = img_nametag.shape[:2]
+        ch, cw = img_roi.shape[:2]
+        if th > ch or tw > cw:
+            return None
 
         # Pad search region to deal with fail detection when player is at map edge
         (pad_y, pad_x) = self.img_nametag.shape[:2]
@@ -498,13 +817,18 @@ class MapleStoryAutoBot:
             borderType=cv2.BORDER_REPLICATE  # replicate border for safe matching
         )
 
-        # Get last frame name tag location
-        if self.is_first_frame:
+        # Get last frame name tag location.
+        # BUG-FIX (task #1 item 2): previous code used self.loc_nametag
+        # directly (absolute full-window coords) inside the cropped ROI,
+        # which meant the "last result" hint pointed at completely the
+        # wrong place when CROP_DX/CROP_DY were nonzero.  Now we subtract
+        # the crop offsets before adding padding back.
+        if self.is_first_frame or self.loc_nametag == (0, 0):
             last_result = None
         else:
             last_result = (
-                self.loc_nametag[0] + pad_x,
-                self.loc_nametag[1] + pad_y
+                (self.loc_nametag[0] - CROP_DX) + pad_x,
+                (self.loc_nametag[1] - CROP_DY) + pad_y,
             )
 
         # Get number of splits
@@ -547,36 +871,172 @@ class MapleStoryAutoBot:
 
         # Select best match and fix offset:
         matches.sort(key=lambda x: (not x[5], x[2]))  # prefer cached, then low score
-        tag_type, loc_nametag, score, w_match, h_match, is_cached, offset_x = matches[0]
+        tag_type, loc_in_padded, score, w_match, h_match, is_cached, offset_x = matches[0]
 
-        # Adjust match location back to full nametag coordinates
-        loc_nametag = (loc_nametag[0] - offset_x, loc_nametag[1])
-        loc_nametag = (
-            loc_nametag[0] - pad_x,
-            loc_nametag[1] - pad_y
+        # --- Unwind coordinate transforms (task #1 bug #2) ----------------
+        # loc_in_padded lives in "cropped ROI + border-padding" space.
+        # 1) subtract split-horizontal offset
+        # 2) subtract border padding → back to cropped-playfield relative
+        # 3) ADD BACK CROP_DX/CROP_DY → absolute full-window coords
+        lx_rel_pad = loc_in_padded[0] - offset_x
+        ly_rel_pad = loc_in_padded[1]
+        lx_rel_crop = lx_rel_pad - pad_x
+        ly_rel_crop = ly_rel_pad - pad_y
+        loc_nametag_abs = (lx_rel_crop + CROP_DX, ly_rel_crop + CROP_DY)
+
+        # --- Score gate (task #1 bug #1) ----------------------------------
+        # ROOT FIX: when score >= diff_thres we MUST NOT fall back to the
+        # stale self.loc_nametag (which on the very first run often stored
+        # a non-cropped match against the top-right UI panel).  Instead we
+        # return None so the cascade can try Stage 3 (camera center).
+        DIFF_THRES = self.cfg["nametag"]["diff_thres"]
+        if score >= DIFF_THRES:
+            return None
+
+        # Score is good → cache the absolute full-window nametag position.
+        self.loc_nametag = loc_nametag_abs
+
+        # Compute player center from nametag (still in full-window abs coords)
+        loc_player_abs = (
+            loc_nametag_abs[0] + w // 2,
+            loc_nametag_abs[1] - self.cfg["nametag"]["offset"][1],
         )
 
-        # Only update nametag location when score is good enough
-        if score < self.cfg["nametag"]["diff_thres"]:
-            self.loc_nametag = loc_nametag
-
-        loc_player = (
-            self.loc_nametag[0] + w // 2,
-            self.loc_nametag[1] - self.cfg["nametag"]["offset"][1]
-        )
+        # --- Anti-FP temporal/geometry filter (task #1 bug #3) ------------
+        if self._is_nametag_false_positive(loc_nametag_abs, loc_player_abs):
+            return None
 
         # Draw name tag detection box for debugging
-        draw_rectangle(self.img_frame_debug, self.loc_nametag,
+        draw_rectangle(self.img_frame_debug, loc_nametag_abs,
                        self.img_nametag.shape, (0, 255, 0), "")
         text = f"NameTag,{round(score, 2)}," + \
                 f"{'cached' if is_cached else 'missed'}," + \
                 f"{tag_type}"
         cv2.putText(self.img_frame_debug, text,
-                    (self.loc_nametag[0],
-                     self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
+                    (loc_nametag_abs[0],
+                     loc_nametag_abs[1] + self.img_nametag.shape[0] + 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        return loc_player
+        return loc_player_abs
+
+    def _is_party_red_bar_false_positive(self, prb_bar, prb_player, img_camera_h):
+        '''
+        Decide whether the biggest-contour red box that *looks* like a party
+        red bar is actually a static UI element.
+
+        Heuristics (CN/怀旧服 oriented — these are *conservative* rejections,
+        i.e. we only kill candidates that are almost certainly UI):
+
+          (a) **Screen-geometry sanity** — a real above-character bar should
+              live inside the "playfield" region, NOT glued to the very top /
+              very right edge of the frame.  Panels on the top-right are the
+              canonical place clients put character info, HP bars and party
+              member mini-bars.
+          (b) **Temporal sanity** — character bars *jitter* (idle animation,
+              knockback, walking, jumping, even just camera sub-pixel shifts).
+              A box whose position (both bar top-left and derived player
+              center) hasn't moved more than ~2 px across the last 12 frames
+              is almost certainly a static UI panel decoration.
+          (c) **Warm-up grace** — the bot starts with the character still, so
+              rule (b) only kicks in after a short warm-up window (4 s).
+
+        Returns ``True`` when we believe this is a UI false-positive and the
+        caller should pretend Stage 1 returned ``(None, None)``.  Also writes
+        a one-shot diagnostic crop to ``log/debug_party_red_fp_*.png`` the
+        first time we convict, so the user can sanity-check.
+        '''
+        if prb_bar is None or prb_player is None:
+            return True
+
+        bx, by, bw, bh = prb_bar[0], prb_bar[1], prb_bar[2], prb_bar[3]
+        W, H = WINDOW_WORKING_SIZE
+
+        # --- (a) Geometry rejection (cheap, per-frame) --------------------
+        #   Top 22 px   : real bars want clearance for nameplate + top border
+        #   Right 36%  : top-right character panel area (CN client big HP)
+        #   Bottom 24% : bottom HP/MP/EXP bars
+        #   Left 14%   : reserved for mini-map + chat panel
+        PLAY_Y_LO  = int(H * 0.06)
+        PLAY_Y_HI  = int(H * 0.76)
+        PLAY_X_LO  = int(W * 0.14)
+        PLAY_X_HI  = int(W * 0.64)
+        geom_violation = not (PLAY_X_LO <= bx <= PLAY_X_HI and
+                              PLAY_Y_LO <= by <= PLAY_Y_HI)
+
+        # Track temporal statistics (do this even on geom-fail so the buffer
+        # stays warm if the detector is simply drifting between panels).
+        self._prb_track_frames.append((prb_bar, prb_player))
+        if len(self._prb_track_frames) > self._prb_track_len:
+            self._prb_track_frames.pop(0)
+
+        if self._prb_first_frame_t is None:
+            self._prb_first_frame_t = time.time()
+
+        # --- (b) Temporal rejection ---------------------------------------
+        temp_violation = False
+        if len(self._prb_track_frames) == self._prb_track_len:
+            bx0, by0 = self._prb_track_frames[ 0][0][:2]
+            bxN, byN = self._prb_track_frames[-1][0][:2]
+            px0, py0 = self._prb_track_frames[ 0][1]
+            pxN, pyN = self._prb_track_frames[-1][1]
+            bar_dx   = abs(bxN - bx0)
+            bar_dy   = abs(byN - by0)
+            play_dx  = abs(pxN - px0)
+            play_dy  = abs(pyN - py0)
+            # Need AT LEAST 3 px of displacement in either (bar or player)
+            # over the tracking window.  3 px is tiny (idle breathing causes
+            # that much), so anything less is definitely static UI.
+            if (bar_dx + bar_dy) < 3 and (play_dx + play_dy) < 3:
+                warmup_s = time.time() - self._prb_first_frame_t
+                if warmup_s > 4.0:
+                    temp_violation = True
+
+        is_fp = geom_violation or temp_violation
+
+        # One-shot diagnostics — save a crop + a short log the FIRST time we
+        # convict (not every frame).  Crop is taken from img_camera
+        # (top-part) so the user can eyeball what box was picked.
+        if is_fp and (geom_violation or temp_violation) and \
+           not self._prb_dbg_fp_saved and len(self._prb_track_frames) >= 4:
+            self._prb_dbg_fp_saved = True
+            try:
+                # Build a tiny diagnostic mosaic: a larger crop around the
+                # convicted box, drawn with a red rectangle.
+                pad_x, pad_y = 40, 28
+                cx0 = max(0, bx - pad_x)
+                cy0 = max(0, by - pad_y)
+                cx1 = min(W, bx + bw + pad_x)
+                cy1 = min(img_camera_h, by + bh + pad_y)
+                if hasattr(self, "img_frame") and self.img_frame is not None:
+                    crop = self.img_frame[cy0:cy1, cx0:cx1].copy()
+                    # draw rect *within crop coords*
+                    rbx, rby = bx - cx0, by - cy0
+                    cv2.rectangle(crop, (rbx, rby), (rbx + bw, rby + bh),
+                                  (0, 0, 255), 2)
+                    cv2.imwrite("log/debug_party_red_fp_crop.png", crop)
+                    cv2.imwrite("log/debug_party_red_fp_full.png",
+                                self.img_frame)
+            except Exception:  # noqa: BLE001 — debug write is best-effort
+                pass
+            why = []
+            if geom_violation: why.append(f"geom(box@({bx},{by}) outside playfield)")
+            if temp_violation: why.append("static(12 frames <3px displacement)")
+            _why = " + ".join(why) if why else "unknown"
+            logger.warning(
+                f"[Stage1 party_red_bar] CONVICTED false-positive ({_why}). "
+                "Stage 1 disabled for the rest of the run; falling back to "
+                "Stage 2 (nametag) / Stage 3 (camera center).  Crop saved to "
+                "log/debug_party_red_fp_*.png if you want to verify."
+            )
+
+        if is_fp:
+            self._prb_fp_suspected = True
+            # Stay "suspected" for a few frames; after 2 full tracking
+            # windows of sustained FP, commit to disabling Stage 1.  This
+            # dampens one-off flicker.
+            if len(self._prb_track_frames) >= self._prb_track_len * 2:
+                self._prb_fp_disabled = True
+        return is_fp
 
     def get_player_location_by_party_red_bar(self):
         '''
@@ -682,6 +1142,15 @@ class MapleStoryAutoBot:
         loc_player = (bx + self.cfg["party_red_bar"]["offset"][0],
                       by + self.cfg["party_red_bar"]["offset"][1])
 
+        # Anti-FP check: if the best box sits in a top-right character panel
+        # or has been static across ~0.5 s of frames, it's almost certainly
+        # a UI blood bar / decoration — NOT the character's own party bar.
+        # Treat Stage 1 as a miss so the cascade keeps going.
+        full_bar_box = (bx, by, bw, bh)
+        cam_h = img_camera.shape[0]
+        if self._is_party_red_bar_false_positive(full_bar_box, loc_player, cam_h):
+            return None, None
+
         # visualize for debug
         draw_rectangle(self.img_frame_debug, loc_party_red_bar,
                     (bh, bw), (0, 255, 0), "party red bar", thickness=1, text_height=0.4)
@@ -691,15 +1160,155 @@ class MapleStoryAutoBot:
     def get_player_location_on_global_map(self):
         '''
         get_player_location_on_global_map
-        '''
-        self.loc_minimap_global, score, _ = find_pattern_sqdiff(
-                                        self.img_map,
-                                        self.img_minimap)
 
+        Resolves ``self.loc_player_global`` — the player's pixel position on
+        ``self.img_route`` (the full-route overlay image).
+
+        **Original upstream formula (Artale client only):**
+            ``loc_player_global = loc_minimap_global + loc_player_minimap + offset``
+
+        That relies on TWO independent CV matchers both succeeding every frame:
+          * ``find_pattern_sqdiff(img_map, img_minimap)`` → where is the top-left
+            white-boxed minimap glued on to the route map background
+            (``loc_minimap_global``).
+          * ``get_player_location_on_minimap()`` → yellow player dot *inside*
+            the ``img_minimap`` crop (``loc_player_minimap``).
+
+        **Why the CN / 怀旧服 client always ended up STUCK:**
+          1. The upstream ``find_pattern_sqdiff`` **always returns a position**
+             even when the match is garbage — its "fallback" is ``(0,0)``
+             with ``score=1.0``.
+          2. ``get_player_location_on_minimap`` on CN clients usually can't
+             see the yellow dot (default BGR is tuned for Artale; capture
+             pipelines also shift colours slightly) so it keeps returning
+             ``None`` and leaves ``self.loc_player_minimap`` at the zero
+             initialiser.
+          3. Result: ``loc_player_global == (0+0+0, 0+0+0)`` or some other
+             *frame-invariant constant*.  The stuck watchdog sees 0 movement
+             for 10 s and keeps spamming random moves FOREVER — exactly what
+             the user reported.
+
+        **Refined behaviour (robust across clients):**
+          (a) Trust ``loc_minimap_global`` only if the SQDIFF match score is
+              **actually good** (``< 0.4``).  Otherwise synthesise a guess by
+              *linearly mapping* the on-screen player position to the route
+              map's dimensions — this is a 0-th order approximation but it
+              changes every time the camera moves, which is enough to keep
+              the stuck watchdog happy and the route-tracker following a
+              roughly-correct colour code.
+          (b) If ``loc_player_minimap`` is stale (still ``(0,0)`` because no
+              yellow dot was ever observed) substitute a *screen-derived
+              offset*: take the on-screen player position (from whatever
+              cascade stage succeeded — nametag / camera centre / ...) and
+              project it on to the "minimap inside route map" coordinate
+              system using the ratio between the two frames.
+        '''
+        # ------------------------------------------------------------------
+        # Step 1 — where on the ROUTE MAP does the minimap sit?
+        # ------------------------------------------------------------------
+        match_loc, score, _is_cached = find_pattern_sqdiff(
+                                            self.img_map,
+                                            self.img_minimap)
+        if score < 0.4:
+            # Strong template match: trust it.  This is the normal path on
+            # clients where the minimap renders with sharp white borders and
+            # the route-map was captured from the same build.
+            self.loc_minimap_global = match_loc
+        else:
+            # Weak or garbage match.  Don't poison loc_player_global with a
+            # random (0,0) anchor.  Synthesise a guess by linearly mapping
+            # the on-screen player position to the CURRENT ROUTE MAP'S
+            # extents — we use ``self.img_route`` (the active route_*.png
+            # selected by ``idx_routes``) rather than ``self.img_map``
+            # because:
+            #   (a) mask_route_colors may resize img_map to match
+            #       img_route, meaning their shapes CAN differ, and
+            #   (b) get_nearest_color_code searches in img_route coords,
+            #       so the projected point must live in that same space.
+            # NOTE: WINDOW_WORKING_SIZE is (WIDTH, HEIGHT) as per global_var.py
+            # and every other unpack site in this file (L528, L648, L919).
+            # The code below was previously unpacked in the wrong order
+            # (H, W) which projected an on-screen player sitting at the
+            # middle of the frame onto the far-right of the route map,
+            # making the nearest-color lookup return the wrong command.
+            W_WIN_W, W_WIN_H = WINDOW_WORKING_SIZE   # (WIDTH, HEIGHT)
+            # Use the active route image as the projection target, falling
+            # back to img_map (e.g. during the first frame when img_route
+            # hasn't been assigned yet).
+            if getattr(self, "img_route", None) is not None:
+                tgt_h, tgt_w = self.img_route.shape[:2]
+            else:
+                tgt_h, tgt_w = self.img_map.shape[:2]
+            px, py = self.loc_player if self.loc_player is not None else \
+                     (W_WIN_W // 2, int(W_WIN_H * 0.58))
+            proj_gx = int(px / max(1, W_WIN_W) * tgt_w)
+            proj_gy = int(py / max(1, W_WIN_H) * tgt_h)
+            proj_gx = max(0, min(max(0, tgt_w - 1), proj_gx))
+            proj_gy = max(0, min(max(0, tgt_h - 1), proj_gy))
+            self.loc_minimap_global = (0, 0)
+            self._minimap_global_synth = True
+            if not getattr(self, "_mm_global_synth_warned", False):
+                self._mm_global_synth_warned = True
+                logger.warning(
+                    "[get_player_location_on_global_map] minimap→route "
+                    f"template match was poor (score={round(score, 3)} ≥ 0.4). "
+                    "Falling back to a screen→route proportional projection "
+                    f"(target=img_route {tgt_w}x{tgt_h}, "
+                    f"projected_global=({proj_gx},{proj_gy})).  This keeps "
+                    "the watchdog happy but route precision is reduced; for "
+                    "best precision calibrate minimap.player_color and "
+                    "re-capture minimaps/<map>/map.png from the current "
+                    "client build."
+                )
+
+        # ------------------------------------------------------------------
+        # Step 2 — where INSIDE the minimap is the player?
+        # ------------------------------------------------------------------
         x_offset, y_offset = self.cfg["minimap"]["offset"]
+        if getattr(self, "_minimap_global_synth", False) or \
+           self.loc_player_minimap is None or \
+           self.loc_player_minimap == (0, 0):
+            # Project screen→route *again* — re-compute because the code
+            # above might have chosen img_map as a fallback target on the
+            # very first frame while the route image was not yet bound.
+            # NOTE: WINDOW_WORKING_SIZE is (WIDTH, HEIGHT) as per global_var.py
+            # and every other unpack site in this file (L528, L648, L919).
+            # The code below was previously unpacked in the wrong order
+            # (H, W) which projected an on-screen player sitting at the
+            # middle of the frame onto the far-right of the route map,
+            # making the nearest-color lookup return the wrong command.
+            W_WIN_W, W_WIN_H = WINDOW_WORKING_SIZE   # (WIDTH, HEIGHT)
+            if getattr(self, "img_route", None) is not None:
+                tgt_h, tgt_w = self.img_route.shape[:2]
+            else:
+                tgt_h, tgt_w = self.img_map.shape[:2]
+            px, py = self.loc_player if self.loc_player is not None else \
+                     (W_WIN_W // 2, int(W_WIN_H * 0.58))
+            proj_gx = int(px / max(1, W_WIN_W) * tgt_w)
+            proj_gy = int(py / max(1, W_WIN_H) * tgt_h)
+            proj_gx = max(0, min(max(0, tgt_w - 1), proj_gx))
+            proj_gy = max(0, min(max(0, tgt_h - 1), proj_gy))
+            # Goal: loc_minimap_global (0,0) + loc_player_minimap + offset
+            # equals the projected pixel so that the downstream sum lands
+            # exactly on (proj_gx, proj_gy).
+            loc_player_minimap = (proj_gx - x_offset, proj_gy - y_offset)
+            if not getattr(self, "_minimap_global_synth", False) and \
+               not getattr(self, "_loc_player_mm_proj_warned", False):
+                self._loc_player_mm_proj_warned = True
+                logger.warning(
+                    "[get_player_location_on_global_map] No visible "
+                    "minimap player dot (loc_player_minimap is (0,0)). "
+                    "Substituting an on-screen→minimap projection so the "
+                    "stuck watchdog can still observe movement.  Calibrate "
+                    "minimap.player_color (see debug_minimap_colors.py / "
+                    "log/debug_minimap_player_raw.png) for best accuracy."
+                )
+        else:
+            loc_player_minimap = self.loc_player_minimap
+
         loc_player_global = (
-            self.loc_minimap_global[0] + self.loc_player_minimap[0] + x_offset,
-            self.loc_minimap_global[1] + self.loc_player_minimap[1] + y_offset
+            self.loc_minimap_global[0] + loc_player_minimap[0] + x_offset,
+            self.loc_minimap_global[1] + loc_player_minimap[1] + y_offset
         )
 
         # Draw local minimap rectangle
@@ -742,88 +1351,155 @@ class MapleStoryAutoBot:
                 - "action": corresponding action string from config
                 - "distance": Manhattan distance from player
             Returns None if no matching color is found within the region.
+
+        **CN/怀旧服 compatibility note**
+        ---------------------------------
+        Upstream searched only a tiny ``search_range`` (default 10 px) box
+        around the player.  That assumption breaks whenever
+        ``get_player_location_on_global_map`` had to fall back to a
+        *synthesised* coordinate (minimap→route template score ≥ 0.4, or
+        missing yellow player dot).  In those situations the coordinate
+        error is usually 20–300 px so a 10-px radius window always comes
+        back empty → ``cmd_move_*`` stays at ``"none"`` → the character
+        never moves, and because the synthesised coordinate jitters every
+        frame the stuck-watchdog doesn't even fire a random rescue action.
+
+        Fixed here by running **two passes**:
+          Pass 1 — tight box of ``cfg.search_range`` (the upstream
+                   behaviour; still preferred because it's O(range²) fast).
+          Pass 2 — if Pass 1 yielded nothing, scan the **whole route
+                   image** but still pick the *geometrically nearest*
+                   colour-code pixel.  This is O(W·H) per frame but route
+                   images are small (a few hundred px on each side), and on
+                   CN clients where we can't trust the global-map position
+                   it's the only way the bot actually walks along the
+                   authored route.
         '''
         x0, y0 = self.loc_player_global
         h, w = self.img_route.shape[:2]
-        x_min = max(0, x0 - self.cfg["route"]["search_range"])
-        x_max = min(w, x0 + self.cfg["route"]["search_range"])
-        y_min = max(0, y0 - self.cfg["route"]["search_range"])
-        y_max = min(h, y0 + self.cfg["route"]["search_range"])
+        base_range = int(self.cfg["route"]["search_range"])
 
-        nearest = None
-        nearest_up_down = None
-        min_dist = float('inf')
-        min_dist_up_down = float('inf')
-        for y in range(y_min, y_max):
-            for x in range(x_min, x_max):
-                pixel = tuple(self.img_route[y, x])  # (R, G, B)
-                dist = abs(x - x0) + abs(y - y0)
-                # Get nearest color
-                if pixel in self.color_code and dist < min_dist:
-                    nearest = {
-                        "pixel": (x, y),
-                        "color": pixel,
-                        "command": self.color_code[pixel],
-                        "distance": dist
-                    }
-                    min_dist = dist
-                # Get nearest color (up, dowm)
-                if pixel in self.color_code_up_down and dist < min_dist_up_down:
-                    nearest_up_down = {
-                        "pixel": (x, y),
-                        "color": pixel,
-                        "command": self.color_code_up_down[pixel],
-                        "distance": dist
-                    }
-                    min_dist_up_down = dist
+        # ------------------------------------------------------------------
+        # Helper: scan a single rectangular region and update the two
+        # "nearest" accumulators passed in (mutable lists of length 1).
+        # ------------------------------------------------------------------
+        def _scan_region(x_min, y_min, x_max, y_max,
+                         _nearest, _nearest_ud,
+                         _min_dist, _min_dist_ud):
+            for y in range(y_min, y_max):
+                row = self.img_route[y]
+                for x in range(x_min, x_max):
+                    pixel = (int(row[x, 0]), int(row[x, 1]), int(row[x, 2]))
+                    dist = abs(x - x0) + abs(y - y0)
+                    if pixel in self.color_code and dist < _min_dist[0]:
+                        _nearest[0] = {
+                            "pixel": (x, y),
+                            "color": pixel,
+                            "command": self.color_code[pixel],
+                            "distance": dist,
+                        }
+                        _min_dist[0] = dist
+                    if pixel in self.color_code_up_down and dist < _min_dist_ud[0]:
+                        _nearest_ud[0] = {
+                            "pixel": (x, y),
+                            "color": pixel,
+                            "command": self.color_code_up_down[pixel],
+                            "distance": dist,
+                        }
+                        _min_dist_ud[0] = dist
 
-        # Debug
+        nearest       = [None]
+        nearest_ud    = [None]
+        min_dist      = [float('inf')]
+        min_dist_ud   = [float('inf')]
+
+        # Pass 1 — tight window (fast, upstream behaviour)
+        xr_lo = max(0, x0 - base_range)
+        xr_hi = min(w, x0 + base_range)
+        yr_lo = max(0, y0 - base_range)
+        yr_hi = min(h, y0 + base_range)
+        _scan_region(xr_lo, yr_lo, xr_hi, yr_hi,
+                     nearest, nearest_ud, min_dist, min_dist_ud)
+
+        # Draw the tight search box on the route debug overlay regardless
+        # of success (the user wants to SEE where the tracker thinks they
+        # are, even when it's wrong).
         draw_rectangle(
             self.img_route_debug,
-            (x_min, y_min),
-            (self.cfg["route"]["search_range"]*2,
-             self.cfg["route"]["search_range"]*2),
+            (xr_lo, yr_lo),
+            ((xr_hi - xr_lo), (yr_hi - yr_lo)),
             (0, 0, 255), "", text_height=0.4, thickness=1,
         )
-        # Draw a straigt line from map_loc_player to color_code["pixel"]
-        if nearest is not None:
-            cv2.line(
-                self.img_route_debug,
-                self.loc_player_global, # start point
-                nearest["pixel"],       # end point
-                (0, 255, 0),            # green line
-                1                       # thickness
-            )
-            # Print color code on debug image
+
+        # Pass 2 — if nothing matched, scan the whole route image.  Also
+        # emit a one-shot WARNING (with periodic throttled replays) so the
+        # user can tell we're doing a slow scan.  Throttle at ~once per 5 s
+        # to avoid spamming.
+        used_fallback = False
+        if nearest[0] is None and nearest_ud[0] is None:
+            used_fallback = True
+            _scan_region(0, 0, w, h,
+                         nearest, nearest_ud, min_dist, min_dist_ud)
+            now = time.time()
+            _last = getattr(self, "_route_color_fallback_logged_at", -99999)
+            if now - _last > 5.0:
+                self._route_color_fallback_logged_at = now
+                d1 = None if nearest[0]    is None else nearest[0]   ["distance"]
+                d2 = None if nearest_ud[0] is None else nearest_ud[0]["distance"]
+                n_px   = None if nearest[0]    is None else nearest[0]   ["pixel"]
+                n_cmd  = None if nearest[0]    is None else nearest[0]   ["command"]
+                n_col  = None if nearest[0]    is None else nearest[0]   ["color"]
+                ud_px  = None if nearest_ud[0] is None else nearest_ud[0]["pixel"]
+                ud_cmd = None if nearest_ud[0] is None else nearest_ud[0]["command"]
+                ud_col = None if nearest_ud[0] is None else nearest_ud[0]["color"]
+                screen_loc = getattr(self, "loc_player", None)
+                loc_method  = getattr(self, "_last_loc_method", "?")
+                logger.warning(
+                    "[get_nearest_color_code] Tight search window "
+                    f"(range={base_range} px) around player_global=({x0},{y0}) "
+                    "found no route colour-code pixels.  Fallback: scanned "
+                    f"full route map ({w}×{h}).  "
+                    f"main: dist={d1} pixel={n_px} color={n_col} cmd={n_cmd!r}; "
+                    f"ud: dist={d2} pixel={ud_px} color={ud_col} cmd={ud_cmd!r}.  "
+                    f"screen_loc_player={screen_loc} loc_method={loc_method}.  "
+                    "This usually means minimap→route template matching "
+                    "failed; re-capturing minimaps/<map>/map.png from the "
+                    "current client build will dramatically improve route "
+                    "precision and lower CPU cost."
+                )
+
+        # Draw a green line from the current player_global estimate to
+        # whichever colour-code pixel finally "won" this frame.  If we
+        # used the fallback (full-map) scan, draw the line in MAGENTA so
+        # the user can tell at a glance that the tracker is no longer
+        # trusting the projected coordinate.
+        if nearest[0] is not None:
+            line_color = (255, 0, 255) if used_fallback else (0, 255, 0)
+            cv2.line(self.img_route_debug,
+                     self.loc_player_global, nearest[0]["pixel"],
+                     line_color, 1)
             cv2.putText(
-                self.img_frame_debug, f"Route Action: {nearest['command']}",
-                (650, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+                self.img_frame_debug, f"Route Action: {nearest[0]['command']}",
+                (650, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
+                2, cv2.LINE_AA,
             )
             cv2.putText(
                 self.img_frame_debug, f"Route Index: {self.idx_routes}",
-                (650, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+                (650, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
+                2, cv2.LINE_AA,
             )
-
-        if nearest_up_down is not None:
+        if nearest_ud[0] is not None:
+            line_color = (255, 128, 255) if used_fallback else (0, 0, 255)
             cv2.putText(
-                self.img_frame_debug, f"Route Action: {nearest_up_down['command']}",
-                (650, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+                self.img_frame_debug, f"Route Action: {nearest_ud[0]['command']}",
+                (650, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
+                2, cv2.LINE_AA,
             )
-            cv2.line(
-                self.img_route_debug,
-                self.loc_player_global,  # start point
-                nearest_up_down["pixel"],# end point
-                (0, 0, 255),             # green line
-                1                        # thickness
-            )
+            cv2.line(self.img_route_debug,
+                     self.loc_player_global, nearest_ud[0]["pixel"],
+                     line_color, 1)
 
-        return nearest, nearest_up_down  # if not found return none
+        return nearest[0], nearest_ud[0]  # if not found return none
 
     def get_attack_range(self, is_left=True):
         '''
@@ -1163,36 +1839,95 @@ class MapleStoryAutoBot:
 
     def is_player_stuck(self):
         """
-        Checks whether the player is stuck (not moving)
-        based on their global position on map.
+        Checks whether the player is stuck (not moving).
 
-        This function:
-        - Compares the player's current position with their last known position
-          tracked by the watchdog.
-        - If the player has moved beyond a threshold (`watch_dog_range`),
-          it resets the watchdog timer.
-        - If the player hasn't moved and the elapsed time exceeds (`watch_dog_timeout`),
-          it flags the player as stuck and resets the watchdog.
+        Two mutually complementary detection modes are used depending on how
+        the player was located this frame:
+
+        **Mode A — precise global map position (default)**
+          When the minimap → route template match actually succeeded (i.e.
+          ``_minimap_global_synth`` is False and the nametag / party-red-bar
+          stage produced a trusted location), compare the current global
+          position against ``loc_watch_dog`` exactly like the original
+          implementation did.  Movement exceeding ``watchdog.range`` resets
+          the timer; idle longer than ``watchdog.timeout`` flags the player
+          as stuck.
+
+        **Mode B — synthesized / fallback position (CN client common case)**
+          When we are *not* running in precise mode (camera_center_fallback,
+          nametag false-positive triggered, minimap template match failed
+          and we fell back to a screen→route proportional projection, or
+          ``_minimap_global_synth`` is True) the player's *projected* global
+          position is effectively anchored to the camera — which in
+          MapleStory follows the character, so ``loc_player_global`` looks
+          static even when the character is running perfectly well.  Using
+          the original distance-based check in this scenario causes
+          100%-repeatable false positives every ``watchdog.timeout``
+          seconds.
+
+          Instead, we treat the keyboard commands *being emitted* as the
+          ground truth for motion:
+            * If ``cmd_move_x`` or ``cmd_move_y`` is actively non-``none``
+              (i.e. the bot is trying to walk in some direction) we consider
+              the character "moving enough" and reset the watchdog timer.
+              This lets a direction command keep the watchdog happy for as
+              long as the character keeps pressing LEFT/RIGHT/UP/DOWN, which
+              is exactly what we want in fallback mode.
+            * If commands sit at ``none`` for longer than
+              ``watchdog.timeout`` then the character *really is* idle and
+              we return True (stuck) just like in precise mode.
 
         Returns:
             bool: True if the player is stuck, False otherwise.
         """
-        dx = abs(self.loc_player_global[0] - self.loc_watch_dog[0])
-        dy = abs(self.loc_player_global[1] - self.loc_watch_dog[1])
-
         current_time = time.time()
-        if dx + dy > self.cfg["watchdog"]["range"]:
-            # Player moved, reset watchdog timer
-            self.loc_watch_dog = self.loc_player_global
-            self.t_watch_dog = current_time
-            return False
+
+        # ------------------------------------------------------------------
+        # Decide which detection mode we're in.  Any of these triggers
+        # switches us to the command-based (Mode B) check.
+        # ------------------------------------------------------------------
+        loc_method = getattr(self, "_last_loc_method", None) or ""
+        synth_mode = bool(getattr(self, "_minimap_global_synth", False)) or \
+                     loc_method in (
+                        "camera_center_fallback",
+                        "nametag_false_positive_fallback",
+                     )
+
+        if not synth_mode:
+            # Mode A — precise global map motion (original behaviour)
+            dx = abs(self.loc_player_global[0] - self.loc_watch_dog[0])
+            dy = abs(self.loc_player_global[1] - self.loc_watch_dog[1])
+            if dx + dy > self.cfg["watchdog"]["range"]:
+                self.loc_watch_dog = self.loc_player_global
+                self.t_watch_dog = current_time
+                return False
+        else:
+            # Mode B — use active move commands as motion proxy.
+            #
+            # NOTE: We intentionally inspect ``self.kb.cmd_left_right`` and
+            # ``self.kb.cmd_up_down`` here rather than the "desired"
+            # commands produced by update_cmd_by_route, because these are
+            # the values *actually currently being dispatched* by the
+            # keyboard-controller thread.  If the KB thread holds a LEFT
+            # key pressed we want to give it credit.
+            cmd_lr = getattr(getattr(self, "kb", None), "cmd_left_right", "none") or "none"
+            cmd_ud = getattr(getattr(self, "kb", None), "cmd_up_down",   "none") or "none"
+            if cmd_lr not in ("none", "stop") or cmd_ud not in ("none", "stop"):
+                # Bot is actively sending a direction -> not stuck.
+                self.loc_watch_dog = self.loc_player_global
+                self.t_watch_dog = current_time
+                return False
 
         dt = current_time - self.t_watch_dog
         if dt > self.cfg["watchdog"]["timeout"]:
             # watch dog idle for too long, player stuck
             self.loc_watch_dog = self.loc_player_global
             self.t_watch_dog = current_time
-            logger.warning(f"[is_player_stuck] Player stuck for {round(dt, 2)} seconds.")
+            logger.warning(
+                f"[is_player_stuck] Player stuck for {round(dt, 2)} seconds "
+                f"(mode={'cmd-based fallback' if synth_mode else 'global-map'} "
+                f"loc_method={loc_method!r})."
+            )
             return True
         return False
 
@@ -1375,18 +2110,103 @@ class MapleStoryAutoBot:
             self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
                 self.img_frame[self.cfg["ui_coords"]["ui_y_start"]:, :][y:y+h, x:x+w]
 
-        # Print command on screen
-        cv2.putText(self.img_frame_debug, f"Cmd: {self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}",
-                    (10, 430), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        # ================================================================
+        # Debug viz overlay — MOB DETECTION SUMMARY (always drawn).
+        # Users often report "I don't see any detection boxes so the
+        # detector mustn't be running", but the detector was running and
+        # just returned N=0 inside a too-small search box.  We fix that
+        # perception gap by always printing a single coloured line on
+        # the debug canvas that summarises the current detect state.
+        #   - GREEN  : BOX_count>0 → detector working, mobs found.
+        #   - YELLOW : BOX_count=0 but FULL_count>0 → "mobs on screen
+        #              but outside the narrow attack box".
+        #   - PURPLE : BOX_count=0, FULL_count=0, grayscale_count>0 →
+        #              default detect mode missed them; grayscale caught
+        #              them.
+        #   - RED    : everything 0 → detector really is blind to this
+        #              client's sprites.  Switch to test mode.
+        # ================================================================
+        def _draw_mob_status_line(text, color_bgr):
+            try:
+                if self.img_frame_debug is None: return
+                overlay = self.img_frame_debug
+                # Draw the line at y≈20 (below route text which is at ~40)
+                cv2.putText(overlay, text, (8, 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_bgr, 2)
+            except Exception:
+                pass
+        try:
+            _status_box = len(self.monsters) if hasattr(self, 'monsters') else -1
+            _status_counters = getattr(self, "_last_mob_full_counters", None) or {}
+            full_count = _status_counters.get("full", -1)
+            grayscale_count = _status_counters.get("grayscale", -1)
+            if _status_box > 0:
+                color_box = (0, 220, 0)   # green
+                tag = f"BOX_mobs={_status_box} attack-ready"
+            elif full_count > 0:
+                color_box = (0, 220, 220)  # yellow
+                tag = (f"BOX=0 FULL={full_count} "
+                       f"({'used_fallback_box' if _status_counters.get('used_fb') else 'pending_move'})")
+            elif grayscale_count > 0:
+                color_box = (220, 0, 220)  # purple
+                tag = f"BOX=0 FULL=0 GRAYSCALE={grayscale_count} (mode mismatch)"
+            else:
+                color_box = (0, 0, 220)   # red
+                tag = "BOX=0 FULL=0 → detector blind; press F2 for debug crop"
+            detect_mode = "?"
+            try:
+                detect_mode = str(self.cfg["monster_detect"].get("mode", "?"))
+            except Exception:
+                pass
+            _draw_mob_status_line(
+                f"DETECT[{detect_mode}]: {tag}",
+                color_box,
+            )
+            # Also print to log at ~1 Hz so users who have cv2 windows
+            # minimised still see the status.
+            cls = type(self)
+            if not hasattr(cls, "_viz_mob_status_t"):
+                cls._viz_mob_status_t = 0.0
+            _now = time.time()
+            if _now - cls._viz_mob_status_t >= 1.0:
+                cls._viz_mob_status_t = _now
+                logger.info(
+                    "[DETECTOR_VIZ] "
+                    f"mode={detect_mode!r} BOX={_status_box} FULL={full_count} "
+                    f"GRAYSCALE={grayscale_count} debug_canvas="
+                    f"{'ready' if self.img_frame_debug is not None else 'NONE'} "
+                    f"emit_to_cv2={getattr(self,'_should_emit_debug_to_cv2', None)}"
+                )
+        except Exception:
+            pass
 
     def update_img_frame_debug(self):
         '''
         update_img_frame_debug
+
+        Draws the Game Window Debug CV window.  VIZ FIX: honours the new
+        `_should_emit_debug_to_cv2` flag (which respects user explicit
+        disable_viz) while still letting F2 screenshots succeed.
         '''
-        cv2.imshow("Game Window Debug",
-            self.img_frame_debug[:self.cfg["ui_coords"]["ui_y_start"], :])
-        # Update FPS timer
-        self.t_last_frame = time.time()
+        # Always print command on screen first (even if we're not emitting
+        # to cv2 windows, the F2 screenshot needs this info visible).
+        try:
+            if self.img_frame_debug is not None:
+                cv2.putText(self.img_frame_debug,
+                            f"Cmd: {self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}",
+                            (10, 430), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        except Exception:
+            pass
+        # Only actually create/show cv2 windows if the user left viz ON.
+        if getattr(self, '_should_emit_debug_to_cv2',
+                   bool(self.is_show_debug_window)):
+            try:
+                cv2.imshow("Game Window Debug",
+                    self.img_frame_debug[:self.cfg["ui_coords"]["ui_y_start"], :])
+            except Exception:
+                pass
+            # Update FPS timer
+            self.t_last_frame = time.time()
 
     def ensure_is_in_party(self):
         '''
@@ -1726,6 +2546,37 @@ class MapleStoryAutoBot:
             self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code["command"].split()
         elif color_code_up_down:
             self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code_up_down["command"].split()
+        else:
+            # ------------------------------------------------------------------
+            # No route colour-code was found.  This is extremely rare now that
+            # get_nearest_color_code falls back to a full-route scan, but if
+            # it DOES happen (empty route image, wrong map selected, some
+            # other bug) we must not leave cmd_move_* at their previous
+            # values — otherwise the bot walks in one direction forever or
+            # sits still forever.
+            #
+            # Emergency left/right patrol: toggle direction every 3 s so we
+            # at least produce motion and give mob-detection + random-rescue
+            # a chance to kick in.
+            now = time.time()
+            if now - self._patrol_dir_toggled_at > 3.0:
+                self._patrol_dir_toggled_at = now
+                self._patrol_current = "left" if self._patrol_current == "right" \
+                                                  else "right"
+            self.cmd_move_x = self._patrol_current
+            self.cmd_move_y = "none"
+            self.cmd_action = "none"
+            _last = getattr(self, "_route_empty_patrol_logged_at", -99999)
+            if now - _last > 5.0:
+                self._route_empty_patrol_logged_at = now
+                logger.warning(
+                    "[update_cmd_by_route] get_nearest_color_code returned "
+                    "no match after both tight-window and full-route scans. "
+                    f"Falling back to emergency {self._patrol_current} patrol "
+                    "so the character keeps moving.  This usually indicates "
+                    "minimaps/<map>/route_*.png is empty or contains no "
+                    "colour-code pixels for the configured color_code map."
+                )
 
         # teleport away from edge to avoid falling off cliff
         if self.is_near_edge() and \
@@ -1742,6 +2593,35 @@ class MapleStoryAutoBot:
         # replace teleport to jump if user doesn't set teleport key
         if self.cfg["key"]["teleport"] == "" and self.cmd_action == "teleport":
             self.cmd_action = "jump"
+
+        # ------------------------------------------------------------------
+        # Rate-limited (every 3 s) diagnostic dump so the user can confirm
+        # that the route-tracker is actually producing *something* even when
+        # the synthesis fallback is on.  Logs: *committed* move commands
+        # (after all the if/elif/else branches above have run) + which
+        # colour-code pixel produced them (if any) + current loc_method.
+        # NOTE: this is intentionally placed at the END of the function so
+        # the printed cmd_move_x/y/action values reflect the commands we
+        # are about to send to KeyBoardController this frame, not the stale
+        # values from the previous frame.
+        now = time.time()
+        _dbg_last = getattr(self, "_route_cmd_dbg_logged_at", -99999)
+        if now - _dbg_last > 3.0:
+            self._route_cmd_dbg_logged_at = now
+            def _summ(c):
+                if c is None: return "None"
+                return (f"d={c.get('distance')} px={c.get('pixel')} "
+                        f"col={c.get('color')} cmd={c.get('command')!r}")
+            _loc_m = getattr(self, "_last_loc_method", "?")
+            _lpg = getattr(self, "loc_player_global", None)
+            _lp  = getattr(self, "loc_player", None)
+            logger.info(
+                "[update_cmd_by_route] DIAG: "
+                f"cmd_move_x={self.cmd_move_x!r} cmd_move_y={self.cmd_move_y!r} "
+                f"cmd_action={self.cmd_action!r} | "
+                f"color={_summ(color_code)} | color_ud={_summ(color_code_up_down)} | "
+                f"loc_method={_loc_m} loc_player_global={_lpg} screen_loc_player={_lp}"
+            )
 
     def update_cmd_by_mob_detection(self):
         # Get monster search box
@@ -1766,10 +2646,195 @@ class MapleStoryAutoBot:
 
         # Check if no mob to attack
         if len(self.monsters) == 0:
-            return
+            # ------------------------------------------------------------
+            # ATK MISS#1 early-return diagnostic (0.5 Hz, LRU-cached last
+            # reason).  Prints the exact parameters that caused the empty
+            # result so the user can distinguish:
+            #   - search box too small (wh < 300x200 and dx/dy < 250)
+            #   - player location was off (camera_center_fallback projecting
+            #     player outside playfield)
+            #   - full-screen scan ALSO returned 0 → contour/grayscale/
+            #     color detect mode template/threshold completely wrong for
+            #     the current client sprite.
+            # ------------------------------------------------------------
+            try:
+                cls = type(self)
+                last_dbg_empty = getattr(cls, "_at_mob_dbg_empty_t", 0.0)
+                last_full_scan = getattr(cls, "_at_mob_dbg_full_t", 0.0)
+                now = time.time()
+                box_str = (f"[{x0:.0f},{y0:.0f}→{x1:.0f},{y1:.0f} "
+                           f"wh={x1-x0:.0f}x{y1-y0:.0f}]"
+                           if isinstance(x0,(int,float)) else "?")
+                # Run a one-time full-frame scan every ~4 seconds to
+                # decouple "search box too small" from "detect template
+                # totally mismatches".
+                full_wh = None
+                full_count = -1
+                full_samples = None
+                all_mobs = None
+                grayscale_count = -1
+                grayscale_samples = None
+                if now - last_full_scan >= 4.0:
+                    cls._at_mob_dbg_full_t = now
+                    try:
+                        H, W = self.img_frame.shape[:2]
+                        full_wh = (W, H)
+                        all_mobs = self.get_monsters_in_range((0, 0), (W, H))
+                        full_count = len(all_mobs)
+                        if full_count:
+                            full_samples = [(m.get("name","?"),
+                                             m.get("position",(0,0)),
+                                             m.get("size",(0,0)))
+                                            for m in all_mobs[:3]]
+                        # --------------------------------------------------
+                        # ATK MISS#3: when full-count is still 0 (contour_only
+                        # or default mode totally mismatches the Chinese client's
+                        # mushroom sprites), temporarily fall back once to
+                        # grayscale detect mode (usually a bit more tolerant)
+                        # and compare counts (record so diagnostics tell us if we
+                        # should permanently swap modes entirely.
+                        # --------------------------------------------------
+                        if full_count == 0:
+                            try:
+                                try:
+                                    orig_mode = self.cfg["monster_detect"]["mode"]
+                                    _saved_th = self.cfg["monster_detect"].get("diff_thres", 0.8)
+                                    self.cfg["monster_detect"]["mode"] = "grayscale"
+                                    self.cfg["monster_detect"]["diff_thres"] = max(0.85, _saved_th)
+                                    try:
+                                        mobs_gray = self.get_monsters_in_range((0, 0), (W, H))
+                                        grayscale_count = len(mobs_gray)
+                                        if grayscale_count > 0:
+                                            grayscale_samples = [(m.get("name","?"),
+                                                                  m.get("position",(0,0)),
+                                                                  m.get("size",(0,0)))
+                                                                 for m in mobs_gray[:3]]
+                                    finally:
+                                        self.cfg["monster_detect"]["mode"] = orig_mode
+                                        self.cfg["monster_detect"]["diff_thres"] = _saved_th
+                                except Exception:
+                                    grayscale_count = -2
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                # ------------------------------------------------------------
+                # ATK MISS#2 auto fallback: whenever BOX_count == 0 but a recent
+                # FULL_count > 0, treat the full-frame list as the current
+                # monsters list and skip the early return.  This lets the bot
+                # attack even if the monster is far outside the default
+                # directional_attack range (e.g. a freshly spawned at the
+                # other end of a long platform) — get_nearest_monster
+                # below will correctly pick the closest one and issue a move
+                # command *towards* the mob first, then attack when in range.
+                # ------------------------------------------------------------
+                _used_fallback_box = False
+                if full_count > 0 and all_mobs is not None:
+                    try:
+                        self.monsters = all_mobs
+                        _used_fallback_box = True
+                    except Exception:
+                        pass
+                elif grayscale_count > 0:
+                    # grayscale fallback found mobs when contour/default didn't
+                    try:
+                        # Re-run once with grayscale mode *this frame* so
+                        # self.monsters is populated.  We re-run because
+                        # the cached `mobs_gray` list may be stale (we
+                        # sampled full-scan only every 4s; the actual list is for
+                        # the current frame here).
+                        H, W = self.img_frame.shape[:2]
+                        orig_mode = self.cfg["monster_detect"]["mode"]
+                        orig_th   = self.cfg["monster_detect"].get("diff_thres", 0.8)
+                        try:
+                            self.cfg["monster_detect"]["mode"] = "grayscale"
+                            self.cfg["monster_detect"]["diff_thres"] = max(0.85, orig_th)
+                            _m = self.get_monsters_in_range((0, 0), (W, H))
+                            self.monsters = _m
+                            _used_fallback_box = True
+                        finally:
+                            self.cfg["monster_detect"]["mode"] = orig_mode
+                            self.cfg["monster_detect"]["diff_thres"] = orig_th
+                    except Exception:
+                        pass
+
+                        # ------------------------------------------------------------
+                if now - last_dbg_empty >= 2.0:
+                    cls._at_mob_dbg_empty_t = now
+                    try:
+                        md_mode = self.cfg["monster_detect"]["mode"]
+                    except Exception:
+                        md_mode = "?"
+                    try:
+                        a_rng = (self.cfg["directional_attack"].get("range_x","?"),
+                                 self.cfg["directional_attack"].get("range_y","?"))
+                    except Exception:
+                        a_rng = ("?","?")
+                    try:
+                        img_shape = tuple(getattr(self.img_frame, "shape", (0,0,0))[:2])
+                    except Exception:
+                        img_shape = (0,0)
+                    extra = []
+                    if _used_fallback_box:
+                        extra.append("used_fallback_box=yes")
+                    # VIZ: cache FULL/GRAYSCALE counters on the class so
+                    # the on-screen status line (drawn by update_info_on_img
+                    # can display them for users who only look at the cv2
+                    # window / F2 screenshots.
+                    try:
+                        try:
+                            _bw = int(x1-x0) if isinstance(x0,(int,float)) else None
+                            _bh = int(y1-y0) if isinstance(y0,(int,float)) else None
+                        except Exception:
+                            _bw, _bh = None, None
+                        cached = {"full": full_count,
+                                  "grayscale": grayscale_count,
+                                  "used_fb": bool(_used_fallback_box),
+                                  "box": 0,
+                                  "mode": md_mode,
+                                  "box_wh": (_bw, _bh),
+                                  "player": tuple(int(x) for x in getattr(self,'loc_player',(0,0))),
+                        }
+                        self._last_mob_full_counters = cached
+                    except Exception:
+                        self._last_mob_full_counters = {"full": full_count,
+                                                         "grayscale": grayscale_count,
+                                                         "used_fb": False,
+                                                         "box": 0}
+                    logger.info(
+                        "[update_cmd_by_mob_detection] DIAG_EMPTY: "
+                        f"mode={self.cfg['bot']['attack']!r} "
+                        f"detect_mode={md_mode!r} "
+                        f"margin={margin!r} "
+                        f"directional_attack.range_xy={a_rng!r} "
+                        f"search_box={box_str} "
+                        f"img_frame_wh={(img_shape[1],img_shape[0])} "
+                        f"player_loc={tuple(int(x) for x in getattr(self,'loc_player',(0,0)))} "
+                        f"BOX_count=0 "
+                        + (f"FULL_count={full_count} FULL_wh={full_wh} "
+                           f"FULL_samples={full_samples!r} "
+                           if full_count >= 0 else "")
+                        + (f"grayscale_count={grayscale_count} "
+                           f"grayscale_samples={grayscale_samples!r} "
+                           if grayscale_count >= 0 else "")
+                        + (" ".join(extra) if extra else "")
+                    )
+            except Exception:
+                pass
+            # If neither fallback fired, we still have len(self.monsters)==0
+            # → keep the original behaviour (skip attack this frame).
+            if len(self.monsters) == 0:
+                return
 
         # Update attack command
+        attack_direction_str = None
+        nearest_info = None
         if self.cfg["bot"]["attack"] == "aoe_skill":
+            # Summarise nearest monster (only useful for DIAG, not actual
+            # attack command since AoE ignores direction)
+            if self.monsters:
+                nearest_info = (self.monsters[0].get("name","?"),
+                                self.monsters[0].get("position", (0,0)))
             if time.time() - self.t_last_attack > cooldown:
                 self.cmd_action = "attack"
                 self.t_last_attack = time.time()
@@ -1780,12 +2845,78 @@ class MapleStoryAutoBot:
             monster_right = self.get_nearest_monster(is_left = False)
             # Determine attack direction
             attack_direction = self.get_attack_direction(monster_left, monster_right)
+            attack_direction_str = attack_direction
+            if monster_left is not None:
+                nearest_info = (monster_left.get("name","?"),
+                                monster_left.get("position",(0,0)), "L")
+            if monster_right is not None:
+                # Pick the closer of the two for diagnostics.
+                nr = (monster_right.get("name","?"),
+                       monster_right.get("position",(0,0)), "R")
+                if nearest_info is None:
+                    nearest_info = nr
             # Attack Command
             if time.time() - self.t_last_attack > cooldown and attack_direction is not None:
                 self.cmd_action = "attack"
                 self.t_last_attack = time.time()
                 # Set up attack direction
                 self.cmd_move_x = attack_direction
+
+        # VIZ: cache the non-empty-box counters on the instance so the
+        # on-screen status line can show BOX=N FULL=… when detection
+        # actually found something (vs DIAG_EMPTY path which only updates
+        # the cache when BOX=0).
+        try:
+            md_mode = str(self.cfg["monster_detect"].get("mode", "?"))
+        except Exception:
+            md_mode = "?"
+        try:
+            _cached = getattr(self, "_last_mob_full_counters", {}) or {}
+            _cached["box"] = len(self.monsters)
+            _cached["mode"] = md_mode
+            if nearest_info is not None:
+                _cached["nearest"] = nearest_info
+            _cached["attack_dir"] = attack_direction_str
+            _cached["cmd_action_now"] = self.cmd_action
+            self._last_mob_full_counters = _cached
+        except Exception:
+            pass
+
+        # ------------------------------------------------------------------
+        # Rate-limited DIAG log: lets the user instantly tell whether:
+        #   (A) monster detection found anything in the attack box, or
+        #   (B) everything was found but cooldown blocked the cmd_action, or
+        #   (C) we found nothing at all (the search box was empty)
+        # The log runs at ~0.5 Hz so the log file stays readable.
+        try:
+            cls = type(self)
+            last_dbg = getattr(cls, "_at_mob_dbg_t", 0.0)
+            now = time.time()
+            if now - last_dbg >= 2.0:
+                try:
+                    cls._at_mob_dbg_t = now
+                    if isinstance(x0,(int,float)):
+                        box = (f"[{x0:.0f},{y0:.0f}→{x1:.0f},{y1:.0f} "
+                               f"wh={x1-x0:.0f}x{y1-y0:.0f}]")
+                    else:
+                        box = "?"
+                    dt_cd = time.time() - self.t_last_attack
+                    logger.info(
+                        "[update_cmd_by_mob_detection] DIAG: "
+                        f"mode={self.cfg['bot']['attack']!r} "
+                        f"search_box={box} "
+                        f"monsters_in_range={len(self.monsters)} "
+                        f"nearest={nearest_info!r} "
+                        f"attack_dir={attack_direction_str!r} "
+                        f"cmd_action_now={self.cmd_action!r} "
+                        f"cd_left={max(0, cooldown - dt_cd):.1f}s "
+                        f"t_last_attack={dt_cd:.1f}s_ago "
+                        f"player_loc={tuple(int(x) for x in getattr(self,'loc_player',(0,0)))}"
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def update_cmd_by_random(self):
         '''
@@ -1807,33 +2938,167 @@ class MapleStoryAutoBot:
         '''
         Process one game window frame
         '''
+        # ------------------------------------------------------------------
+        # TOP-LEVEL GUARD: catch *every* unhandled exception raised during
+        # this frame, log a full traceback + 1Hz summary, and return -1 so
+        # the outer loop() knows to re-initialize anything it needs to.
+        #
+        # Why we need this:
+        #   Previously a single raised exception anywhere in run_once (e.g.
+        #   _last_mob_full_counters being unset, img_route_debug being None
+        #   during the viz layer, a NoneType.shape access from a stale
+        #   capture) would propagate up to the Qt signal handler / main
+        #   while-loop and SILENTLY KILL subsequent frames:
+        #     - HuntingState.on_frame might still fire its 1Hz log ONCE
+        #       from inside fsm.do_state_stuff(), then never again.
+        #     - KeyBoardController's own 3s HEARTBEAT keeps firing so the
+        #       user sees "bot not frozen" but sees cmd=(none,none,none)
+        #       forever and infers "bot not moving not attacking".
+        #
+        # This one try/except makes the first failure visible immediately
+        # in the log (full traceback) and keeps the bot looping so it
+        # can self-heal next frame (loc_player refreshes, capture renews
+        # buffers, etc.).
+        # ------------------------------------------------------------------
+        try:
+            return self._run_once_impl()
+        except Exception as _e_run_once:
+            import traceback
+            _tb = traceback.format_exc()
+            _cls = type(self)
+            _now = time.time()
+            _last_tb = getattr(_cls, "_run_once_last_tb_logged_at", -999.0)
+            _last_summ = getattr(_cls, "_run_once_last_summ_logged_at", -999.0)
+            # Full traceback: at most once every 8 s to avoid spamming.
+            if _now - _last_tb >= 8.0:
+                _cls._run_once_last_tb_logged_at = _now
+                logger.error(
+                    "[run_once] Unhandled exception during frame:\n"
+                    + _tb
+                )
+            # Short summary line: 1 Hz so user can see "still failing".
+            if _now - _last_summ >= 1.0:
+                _cls._run_once_last_summ_logged_at = _now
+                logger.warning(
+                    f"[run_once] frame aborted: {type(_e_run_once).__name__}: "
+                    f"{_e_run_once} (see full traceback above if recent)"
+                )
+            # Reset counters so caller doesn't treat us as healthy this frame.
+            self.is_frame_done = False
+            self._mob_detection_ran_this_frame = False
+            return -1
+
+    def _run_once_impl(self):
+        '''
+        Real implementation of run_once — kept separate so a single
+        try/except in run_once() can guard the entire frame pipeline
+        without masking individual per-stage try/excepts inside.
+        '''
         # Start profiler for performance debugging
+
         self.profiler.start()
 
         # Check if need viz window
         self.is_show_debug_window = self.is_need_show_debug_window
-        if not self.is_show_debug_window:
-            self.img_frame_debug = None
-            self.img_route_debug = None
 
-        ###########################
-        ### Image Preprocessing ###
-        ###########################
+        # Grayscale game window (always - these are the real inputs for all
+        # the detectors, regardless of whether viz is ON.)
         # Get game window frame
         img_frame = self.get_img_frame()
         if img_frame is None:
+            # ------------------------------------------------------------------
+            # CAPTURE-FAIL WATCHDOG (1 Hz log + 2 consecutive threshold).
+            # Why this is needed:
+            #   Before this guard, `get_img_frame() is None` would silently
+            #   return -1 every frame, so:
+            #     - FSM's HuntingState.on_frame fired exactly once (when the
+            #       capture was still alive during init).
+            #     - run_once's outer try/except never fires (early-return
+            #       isn't an exception).
+            #     - KeyBoardController's own 3 s heartbeat keeps spamming
+            #       "keys=<idle> backend=keybd_sc_letter" forever, so the
+            #       user sees "bot not frozen but moving=0 attacking=0" and
+            #       has no idea the capture died.
+            #   Now we print a 1 Hz line with capture internals + activate
+            #   the game window (the common reason for "frame = None" is the
+            #   user alt+tabbed away or the window was minimised) until the
+            #   capture resumes.
+            # ------------------------------------------------------------------
+            _now = time.time()
+            _cls = type(self)
+            if not hasattr(_cls, "_capture_fail_cnt"):
+                _cls._capture_fail_cnt = 0
+                _cls._capture_fail_last_log = -999.0
+            _cls._capture_fail_cnt += 1
+            if _now - _cls._capture_fail_last_log >= 1.0:
+                _cls._capture_fail_last_log = _now
+                try:
+                    _cap_thread_alive = (self.capture is not None
+                                         and getattr(self.capture, "is_running", True)
+                                         if self.capture is not None else False)
+                    _hwnd = getattr(self.capture, "hwnd", None)
+                    _wt = getattr(self.capture, "window_title", None)
+                except Exception:
+                    _cap_thread_alive = "?"
+                    _hwnd = None
+                    _wt = None
+                logger.warning(
+                    "[run_once] get_img_frame returned None — "
+                    f"consecutive_fail={_cls._capture_fail_cnt} "
+                    f"capture_thread_alive={_cap_thread_alive} "
+                    f"hwnd={_hwnd} window_title={_wt!r}. "
+                    "Activating game window and retrying next frame. "
+                    "HINT: if this repeats, the game window was minimised / "
+                    "switched to another desktop / the capture thread died — "
+                    "restore the game window to its normal 16:9 size."
+                )
             if not is_mac():
                 activate_game_window(self.capture.window_title)
             return -1 # Wait for game window to be ready
         else:
+            # capture healthy: reset the fail counter.
+            try:
+                type(self)._capture_fail_cnt = 0
+            except Exception:
+                pass
             self.img_frame = img_frame
 
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
 
-        # Image for debug viz
-        if self.is_show_debug_window:
-            self.img_frame_debug = self.img_frame.copy()
+        # ================================================================
+        # VIZ FIX: ALWAYS build the debug viz canvas, even when
+        # is_show_debug_window is False.  This fixes 3 user-visible bugs:
+        #   (1) User presses F2 → screenshot_img_frame() was saving a
+        #       None / empty debug canvas, even though monster detection
+        #       was actually running.
+        #   (2) User toggles viz OFF → ON mid-run → the newly-opened cv2
+        #       window was empty for one full frame.
+        #   (3) User complains "no detection boxes are shown" because they
+        #       never noticed the tiny "Enable Viz" Qt checkbox, ran with
+        #       defaults, and assumed detection wasn't happening at all.
+        #
+        # Extra RAM cost per frame is exactly one BGR copy (e.g. 1296x759
+        # × 3 bytes ≈ 2.8 MB), which is negligible compared to the rest
+        # of the OpenCV allocations made every frame.
+        # ================================================================
+        self.img_frame_debug = self.img_frame.copy()
+        if not hasattr(self, "img_route_debug") or self.img_route_debug is None:
+            # img_route_debug is normally lazily created inside
+            # get_player_location_on_global_map() when viz is ON; create
+            # it here unconditionally so route-global overlaps still
+            # render even when the user starts with viz OFF.
+            try:
+                h, w = self.img_routes[0].shape[:2]
+                self.img_route_debug = self.img_routes[0].copy()
+            except Exception:
+                self.img_route_debug = None
+        # For display layer: still HONOUR the user's explicit viz toggle.
+        # If they turned it OFF via --disable-viz / disable_viz() call,
+        # we stop emitting to cv2 windows at the very end, but we keep
+        # drawing to the buffers so F2 screenshots + on-demand toggles
+        # show the full picture.
+        self._should_emit_debug_to_cv2 = bool(self.is_show_debug_window)
 
         # Get current route image
         if self.cfg["bot"]["mode"] == "normal":
@@ -2040,37 +3305,64 @@ class MapleStoryAutoBot:
 
         self.profiler.mark("State per-frame behavior")
 
+        # ================================================================
+        # Mob detection + attack command synthesis (runs EVERY frame,
+        # regardless of FSM state and regardless of whether
+        # is_show_debug_window is True/False).
+        # ================================================================
+        try:
+            self.update_cmd_by_mob_detection()
+            self._mob_detection_ran_this_frame = True
+        except Exception as _e_mob:
+            logger.warning(f"[run_once] update_cmd_by_mob_detection raised: {_e_mob}")
+            self._mob_detection_ran_this_frame = False
+
+        # Also paint the debug viz layer (DETECT[...] line, monster boxes,
+        # command overlay) every frame — F2 screenshots / Qt signal below
+        # need these pixels rendered even if we don't call cv2.imshow().
+        try:
+            self.update_info_on_img_frame_debug()
+        except Exception as _e_dbg:
+            logger.warning(f"[run_once] update_info_on_img_frame_debug raised: {_e_dbg}")
+
         #####################
         ### Debug Windows ###
         #####################
-        # Don't show debug window to save system resource
-        if not self.is_show_debug_window:
-            return 0 # frame done
+        # Only the *cv2 window emission* is gated by the viz flag.
+        if getattr(self, '_should_emit_debug_to_cv2',
+                   bool(self.is_show_debug_window)):
+            try:
+                self.update_img_frame_debug()  # calls cv2.imshow internally
+            except Exception:
+                pass
 
-        # Print text on debug image
-        self.update_info_on_img_frame_debug()
+            # Save debug window to video
+            if self.video_writer:
+                try:
+                    self.video_writer.write(self.img_frame_debug)
+                except Exception:
+                    pass
 
-        # Save debug window to video
-        if self.video_writer:
-            self.video_writer.write(self.img_frame_debug)
+            # Resize img_route_debug for better visualization
+            if self.cfg["bot"]["mode"] == "normal":
+                try:
+                    self.img_route_debug = cv2.resize(
+                                self.img_route_debug, (0, 0),
+                                fx=self.cfg["minimap"]["debug_window_upscale"],
+                                fy=self.cfg["minimap"]["debug_window_upscale"],
+                                interpolation=cv2.INTER_NEAREST)
+                except Exception:
+                    pass
 
-        # Resize img_route_debug for better visualization
-        if self.cfg["bot"]["mode"] == "normal":
-            self.img_route_debug = cv2.resize(
-                        self.img_route_debug, (0, 0),
-                        fx=self.cfg["minimap"]["debug_window_upscale"],
-                        fy=self.cfg["minimap"]["debug_window_upscale"],
-                        interpolation=cv2.INTER_NEAREST)
+            self.profiler.mark("Debug Window Show")
 
-        self.profiler.mark("Debug Window Show")
+            # Update FPS timer
+            self.t_last_frame = time.time()
 
-        # Update FPS timer
-        self.t_last_frame = time.time()
-
-        # Print profiler result
-        if self.cfg["profiler"]["enable"] and \
-            self.profiler.total_frames % self.cfg["profiler"]["print_frequency"] == 0:
-            logger.info('\n' + self.profiler.report())
+            # Print profiler result
+            if self.cfg["profiler"]["enable"] and \
+                self.profiler.total_frames % self.cfg["profiler"]["print_frequency"] == 0:
+                logger.info('\n' + self.profiler.report())
 
         return 0 # frame done
 
@@ -2085,6 +3377,9 @@ class MapleStoryAutoBot:
             time.sleep(0.3)
             self.ensure_is_in_party()
 
+        _loop_cls = type(self)
+        _loop_last_summ_t = -99999.0
+
         while not self.kb.is_terminated:
 
             t_start = time.time()
@@ -2097,14 +3392,52 @@ class MapleStoryAutoBot:
             if ret == 0:
                 # Draw image on debug window
                 if self.is_show_debug_window and self.is_ui:
-                    img_frame_debug_emit = self.img_frame_debug[:
-                        self.cfg["ui_coords"]["ui_y_start"], :].copy()
-                    img_route_debug_emit = self.img_route_debug.copy()
-                    self.image_debug_signal.emit(img_frame_debug_emit)
-                    self.route_map_viz_signal.emit(img_route_debug_emit)
+                    try:
+                        if self.img_frame_debug is not None:
+                            img_frame_debug_emit = self.img_frame_debug[:
+                                self.cfg["ui_coords"]["ui_y_start"], :].copy()
+                            self.image_debug_signal.emit(img_frame_debug_emit)
+                        if self.img_route_debug is not None:
+                            img_route_debug_emit = self.img_route_debug.copy()
+                            self.route_map_viz_signal.emit(img_route_debug_emit)
+                    except Exception as _e_emit:
+                        logger.warning(f"[loop] Qt debug viz emit failed: {_e_emit}")
+                try:
+                    _loop_cls._loop_last_ret_was_skip = False
+                except Exception:
+                    pass
             else:
-                pass
-                # logger.warning("Skipped debug window update due to invalid frame.")
+                # ------------------------------------------------------------------
+                # LOOP-LEVEL DIAGNOSTIC: if run_once keeps returning ret != 0
+                # (either early -1 from a dead capture, or -1 from an unhandled
+                # exception that the run_once() guard caught + summarised), we
+                # emit a 1 Hz line from the loop so users don't stare at "KB
+                # heartbeat = alive + keys=<idle>" for hours without knowing
+                # why the bot isn't advancing.
+                #   ret == -1 + capture_fail_cnt >= 1  → capture died.
+                #   ret == -1 + no capture warning      → exception inside
+                #       run_once_impl (already printed by run_once guard).
+                # ------------------------------------------------------------------
+                try:
+                    _cap_fail_cnt = getattr(_loop_cls, "_capture_fail_cnt", 0)
+                except Exception:
+                    _cap_fail_cnt = "?"
+                _now = time.time()
+                if _now - _loop_last_summ_t >= 1.0:
+                    _loop_last_summ_t = _now
+                    logger.warning(
+                        f"[loop] run_once returned {ret!r} — frame skipped. "
+                        f"capture_consecutive_fail={_cap_fail_cnt}. "
+                        "HINT: check the immediately preceding log for a "
+                        "'[run_once] get_img_frame returned None ...' line "
+                        "(= game window minimised / capture died) or a "
+                        "'[run_once] Unhandled exception' traceback "
+                        "(= a code error inside the frame handler)."
+                    )
+                try:
+                    _loop_cls._loop_last_ret_was_skip = True
+                except Exception:
+                    pass
 
             self.is_frame_done = True
 

@@ -36,6 +36,22 @@ class FindingRuneState(State):
             return None
 
     def on_frame(self):
+        # 1 Hz heartbeat
+        try:
+            _now = time.time()
+            _last = getattr(type(self), "_last_on_frame_log", -999.0)
+            if _now - _last >= 1.0:
+                type(self)._last_on_frame_log = _now
+                logger.info(
+                    "[FSM] FindingRuneState.on_frame fired. "
+                    f"is_attack={self.is_attack} "
+                    f"loc_rune={getattr(self.bot.rune_solver,'loc_rune',None)} "
+                    f"cmd=({self.bot.cmd_move_x},{self.bot.cmd_move_y},"
+                    f"{self.bot.cmd_action})"
+                )
+        except Exception:
+            pass
+
         # Update rune location on screen
         self.bot.rune_solver.update_rune_location(
                 self.bot.img_frame,
@@ -59,7 +75,8 @@ class FindingRuneState(State):
         self.bot.check_reach_goal()
 
         # Get attack commend by detecting mobs near players
-        if self.is_attack:
+        # (hoisted to run_once; only call here for legacy/non-run_once callers).
+        if self.is_attack and not getattr(self.bot, "_mob_detection_ran_this_frame", False):
             self.bot.update_cmd_by_mob_detection()
 
         # If player stuck for too long, perform a random command
