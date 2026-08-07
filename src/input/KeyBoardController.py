@@ -372,6 +372,7 @@ _PYAUTOGUI_NAME_TO_VK = {
     "f5":       0x74,  "f6":      0x75,  "f7":      0x76,  "f8":      0x77,
     "f9":       0x78,  "f10":     0x79,  "f11":     0x7A,  "f12":     0x7B,
     "ctrl":     0x11,  "lctrl":   0xA2,  "rctrl":   0xA3,
+    "control":  0x11,  "lcontrol":0xA2,  "rcontrol":0xA3,
     "alt":      0x12,  "lalt":    0xA4,  "ralt":    0xA5,
     "shift":    0x10,  "lshift":  0xA0,  "rshift":  0xA1,
     "win":      0x5B,  "lwin":    0x5B,  "rwin":    0x5C,
