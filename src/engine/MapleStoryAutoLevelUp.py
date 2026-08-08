@@ -706,8 +706,27 @@ class MapleStoryAutoBot:
                 if warmup_s > 4.0:
                     temp_violation = True
 
-        is_fp = geom_violation or temp_violation
-        if is_fp and not self._nt_dbg_fp_saved and len(self._nt_track_frames) >= 4:
+        # NOTE on the temporal ("static") rule:
+        #   The intent was to reject the character name rendered STATICALLY in
+        #   the top-right info panel.  But a *real* above-head nametag is also
+        #   static whenever the player simply stands still (just after F1, or
+        #   while waiting).  The old code let a static match escalate all the
+        #   way to a PERMANENT disable (_nt_fp_disabled), which produced the
+        #   exact bug the user reported: "nametag works for ~3 s then never
+        #   again".  Fix: a static match only causes a *soft, this-frame*
+        #   fallback to camera-center; it must NEVER latch the permanent
+        #   disable.  As soon as the player moves, the next frame's nametag is
+        #   accepted again.  Only GEOMETRY violations (match landing in the
+        #   right-info-panel / bottom UI band) are trustworthy enough to count
+        #   toward the permanent disable.
+        # Decision: only GEOMETRY convicts.  A static-but-in-playfield match is
+        # accepted as the real (standing-still) player, so loc_player no longer
+        # flickers between the true spot and the camera-center fallback while
+        # the character waits.  temp_violation is retained purely for the
+        # diagnostic log/crop below.
+        is_fp = geom_violation
+        if (geom_violation or temp_violation) and not self._nt_dbg_fp_saved \
+                and len(self._nt_track_frames) >= 4:
             self._nt_dbg_fp_saved = True
             try:
                 pad = 60
@@ -735,7 +754,10 @@ class MapleStoryAutoBot:
                 "Falling back to Stage 3 (camera center).  "
                 "Diagnostic crop saved to log/debug_nametag_fp_*.png."
             )
-        if is_fp and len(self._nt_track_frames) >= self._nt_track_len * 2:
+        # Permanent disable is reserved for the reliable GEOMETRY signal only.
+        # A purely temporal (static-position) match must not latch it, so a
+        # player who stands still does not permanently lose nametag tracking.
+        if geom_violation and len(self._nt_track_frames) >= self._nt_track_len * 2:
             self._nt_fp_disabled = True
         return is_fp
 
