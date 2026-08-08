@@ -29,6 +29,14 @@ key:
   return_home: "home"       # 🔁 Key to use return home scroll.
   party: "p"                # ⌨️ Party window shortcut
 
+  # 🎮 虚拟手柄后备方案（用于合成键盘方向键被反作弊过滤的情况）
+  # 症状：角色按 F1 后只往一个方向走一小步就卡住、攻击键(字母键)却正常。
+  # 原因：私服/反作弊只放行消息队列里的字母键敲击，却过滤方向键的“合成按住”。
+  # 解决：装 ViGEmBus 驱动 + `pip install vgamepad`，把此项设为 true，
+  #       方向键改走真实 HID Xbox 左摇杆（反作弊通常不过滤真实手柄设备）。
+  #       启用后需在游戏内开启手柄输入并把左摇杆映射到上下左右。
+  use_vgamepad: False
+
 buff_skill:
   # 💫 Buff Skill
   # Automatically apply buff skills when the cooldowns are ready.
