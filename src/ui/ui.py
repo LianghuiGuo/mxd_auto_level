@@ -1114,6 +1114,29 @@ class MainWindow(QMainWindow):
         self.log_output.setTextCursor(cursor)
         self.log_output.ensureCursorVisible()
 
+    def _merge_preserve_unknown(self, on_disk, ui_diff):
+        '''
+        Deep-merge two config dicts.
+
+        ``ui_diff`` (values the UI just produced) takes precedence, but any
+        key that exists only in ``on_disk`` (a field the UI has no widget for,
+        such as a hand-edited ``nametag`` / ``party_red_bar`` block) is kept.
+        This stops the "my hand-edited config gets reset on every run" bug.
+        '''
+        if not isinstance(on_disk, dict):
+            return ui_diff
+        merged = dict(on_disk)
+        for k, v in (ui_diff or {}).items():
+            if (
+                k in merged
+                and isinstance(merged[k], dict)
+                and isinstance(v, dict)
+            ):
+                merged[k] = self._merge_preserve_unknown(merged[k], v)
+            else:
+                merged[k] = v
+        return merged
+
     def closeEvent(self, event):
         '''
         Call when user close the UI window
@@ -1123,7 +1146,20 @@ class MainWindow(QMainWindow):
         # Save current UI config to config_XXXX.yaml
         if "config_default.yaml" not in self.path_cfg_custom:
             cfg_diff = get_cfg_diff(self.cfg_base, self.cfg)
-            save_yaml(cfg_diff, self.path_cfg_custom)
+            # IMPORTANT: The UI only exposes a subset of all config fields
+            # (attack / keys / health / buff / map ...).  Fields the UI has NO
+            # widget for — e.g. `nametag`, `party_red_bar`, `move_by_tap`,
+            # `use_vgamepad` — are edited by the user by hand in the custom
+            # yaml.  If we just dump the UI-derived diff we silently DELETE
+            # those hand-edited fields (the exact bug the user hit: the config
+            # gets "reset" on every run).  So we re-read whatever is currently
+            # on disk and preserve any keys the UI-diff does not carry.
+            try:
+                on_disk = load_yaml(self.path_cfg_custom) or {}
+            except Exception:
+                on_disk = {}
+            merged = self._merge_preserve_unknown(on_disk, cfg_diff)
+            save_yaml(merged, self.path_cfg_custom)
 
         # Save your UI state (e.g., last loaded config path)
         self.save_ui_state()
