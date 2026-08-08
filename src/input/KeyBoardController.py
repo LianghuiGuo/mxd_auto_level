@@ -1543,6 +1543,24 @@ class KeyBoardController():
                 self.vgamepad_enabled = enable_vgamepad()
         except Exception:
             self.vgamepad_enabled = False
+
+        # Optional "tap-to-move" mode:
+        #   Some private-server anti-cheats let a *complete* keydown+keyup
+        #   pair through (letter attack keys work) but silently drop a
+        #   synthetic *held* arrow key (repeated keydown with no keyup),
+        #   so the character takes a single small step and then freezes.
+        #   When move_by_tap is enabled we stop holding the direction key
+        #   and instead fire a fresh full tap (press_key = keydown→keyup)
+        #   every frame, exactly like the letter attack path that already
+        #   works — producing continuous stepping movement.
+        self.move_by_tap = False
+        self.move_tap_hold = 0.08  # seconds each tap holds the arrow key
+        try:
+            _kc = self.cfg.get("key") or {}
+            self.move_by_tap = bool(_kc.get("move_by_tap", False))
+            self.move_tap_hold = float(_kc.get("move_tap_hold", 0.08))
+        except Exception:
+            self.move_by_tap = False
         # Build default button map: YAML-key → gamepad-button.  Users can
         # override in cfg["key"]["vgamepad_buttons"] = {"jump":"A", ...}
         self._vgp_default_map = {
@@ -2253,11 +2271,17 @@ class KeyBoardController():
             target_x = None
             if self.cmd_left_right == "left":
                 key_up("right")
-                key_down("left")
+                if self.move_by_tap:
+                    press_key("left", self.move_tap_hold)
+                else:
+                    key_down("left")
                 target_x = -1.0
             elif self.cmd_left_right == "right":
                 key_up("left")
-                key_down("right")
+                if self.move_by_tap:
+                    press_key("right", self.move_tap_hold)
+                else:
+                    key_down("right")
                 target_x = +1.0
             elif self.cmd_left_right == "stop":
                 key_up("left")
@@ -2282,11 +2306,17 @@ class KeyBoardController():
             target_y = None
             if self.cmd_up_down == "up":
                 key_up("down")
-                key_down("up")
+                if self.move_by_tap:
+                    press_key("up", self.move_tap_hold)
+                else:
+                    key_down("up")
                 target_y = +1.0
             elif self.cmd_up_down == "down":
                 key_up("up")
-                key_down("down")
+                if self.move_by_tap:
+                    press_key("down", self.move_tap_hold)
+                else:
+                    key_down("down")
                 target_y = -1.0
             elif self.cmd_up_down == "stop":
                 key_up("up")

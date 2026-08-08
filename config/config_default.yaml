@@ -37,6 +37,17 @@ key:
   #       启用后需在游戏内开启手柄输入并把左摇杆映射到上下左右。
   use_vgamepad: False
 
+  # 👣 “连续短按”移动模式（不需要手柄，推荐先试这个）
+  # 症状：角色按 F1 后只往一个方向走一小步就卡住、攻击键(字母键)却正常。
+  # 原因：反作弊放行“完整的一次按下+抬起”(字母攻击键)，却过滤方向键的
+  #       “合成持续按住”(只按不抬)。
+  # 解决：把 move_by_tap 设为 true，方向键改为每帧发一次完整短按
+  #       (keydown→抬起)，与能生效的字母攻击键走同一条路径，从而实现
+  #       连续“迈步”式移动。move_tap_hold 控制每次短按按住的时长(秒)，
+  #       值越大步子越大、越顺滑但越像脚本，可按需微调。
+  move_by_tap: False
+  move_tap_hold: 0.08
+
 buff_skill:
   # 💫 Buff Skill
   # Automatically apply buff skills when the cooldowns are ready.
