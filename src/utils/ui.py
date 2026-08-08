@@ -124,12 +124,30 @@ class SingleKeyEdit(QKeySequenceEdit):
         """
         self.setKeySequence(QKeySequence(key_str))
 
+    # Normalise Qt's human-readable key names to the identifiers the
+    # KeyBoardController VK map understands.  Qt's toString() localises
+    # modifier keys (e.g. "Ctrl"/"Control", "Return"/"Enter"), and the
+    # capture widget can only record whatever physical key the user
+    # presses — so users pressing the Ctrl key get "control", which the
+    # controller previously failed to resolve (VK=None).
+    _KEY_NAME_ALIASES = {
+        "control": "ctrl",
+        "return": "enter",
+        "esc": "escape",
+        "del": "delete",
+        "ins": "insert",
+        "pgup": "pageup",
+        "pgdn": "pagedown",
+        "pgdown": "pagedown",
+    }
+
     def get_key(self):
         """
         Return the currently set key as a string, like 'A', 'F1', etc.
         """
         seq = self.keySequence()
-        return seq.toString(QKeySequence.NativeText).strip().lower()
+        name = seq.toString(QKeySequence.NativeText).strip().lower()
+        return self._KEY_NAME_ALIASES.get(name, name)
 
 class QtLogHandler(logging.Handler, QObject):
     '''
