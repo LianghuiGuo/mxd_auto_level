@@ -3098,7 +3098,13 @@ class MapleStoryAutoBot:
         # we stop emitting to cv2 windows at the very end, but we keep
         # drawing to the buffers so F2 screenshots + on-demand toggles
         # show the full picture.
-        self._should_emit_debug_to_cv2 = bool(self.is_show_debug_window)
+        # In UI (PySide6) mode the debug frame is delivered to the embedded
+        # "Game Window Viz" QLabel via Qt signals (see loop()).  We must NOT
+        # also call cv2.imshow() there: the Qt thread has no cv2.waitKey()
+        # message pump, so the extra "Game Window Debug" OpenCV window hangs
+        # and Windows marks it "未响应" (not responding).  So cv2 emission is
+        # only enabled for the standalone/legacy CLI path (not is_ui).
+        self._should_emit_debug_to_cv2 = bool(self.is_show_debug_window) and not self.is_ui
 
         # Get current route image
         if self.cfg["bot"]["mode"] == "normal":
