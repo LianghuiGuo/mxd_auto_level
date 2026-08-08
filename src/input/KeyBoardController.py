@@ -1826,16 +1826,28 @@ class KeyBoardController():
             # is exactly what the user reported: pressing F1 no longer aligns
             # / raises the game window, and the character stops responding to
             # synthetic keys even though the window looks focused.  So we now
-            # run the force-focus routine here too, rate-limited to ~1 Hz so
-            # it doesn't thrash the window every keyboard frame.
-            now = time.time()
-            if now - getattr(self, "_t_last_force_focus", 0.0) >= 1.0:
-                self._t_last_force_focus = now
+            # run the force-focus routine here too — but ONLY ONCE per
+            # continuous "active" streak.  Running it every second was a
+            # mistake: the AttachThreadInput + TOPMOST bounce briefly
+            # re-asserts the window/input state, which INTERRUPTS a key that
+            # the bot is trying to *hold down* for continuous walking.  The
+            # visible symptom is exactly what the user reported: on start the
+            # character takes one small step left and then freezes (each 1 Hz
+            # focus bounce cancels the held LEFT key).  So we latch a flag and
+            # only force-focus the first time we observe the window active;
+            # it is reset whenever the window loses focus (see below), so a
+            # genuine focus loss still re-triggers the full sequence.
+            if not getattr(self, "_force_focus_done_while_active", False):
+                self._force_focus_done_while_active = True
                 try:
                     self._force_focus_game_window()
                 except Exception:
                     pass
             return True
+
+        # Window is NOT active right now → clear the latch so that once we
+        # regain focus we force-focus exactly once again.
+        self._force_focus_done_while_active = False
 
         # --- Stage 1: pygetwindow, matched via all tokens -------------------
         try:
