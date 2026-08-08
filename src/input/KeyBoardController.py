@@ -1817,6 +1817,24 @@ class KeyBoardController():
         '''
         is_active, _ = self.is_game_window_active()
         if is_active:
+            # IMPORTANT: "foreground" is NOT the same as "owns the keyboard
+            # focus queue".  Many private-server / anti-cheat clients (e.g.
+            # 冒险岛怀旧服) only accept synthetic keystrokes after we have
+            # explicitly attached to their input thread and called SetFocus
+            # + a TOPMOST bounce.  When is_active is already True we used to
+            # early-return and SKIP that whole sequence — the visible symptom
+            # is exactly what the user reported: pressing F1 no longer aligns
+            # / raises the game window, and the character stops responding to
+            # synthetic keys even though the window looks focused.  So we now
+            # run the force-focus routine here too, rate-limited to ~1 Hz so
+            # it doesn't thrash the window every keyboard frame.
+            now = time.time()
+            if now - getattr(self, "_t_last_force_focus", 0.0) >= 1.0:
+                self._t_last_force_focus = now
+                try:
+                    self._force_focus_game_window()
+                except Exception:
+                    pass
             return True
 
         # --- Stage 1: pygetwindow, matched via all tokens -------------------
@@ -1986,6 +2004,99 @@ class KeyBoardController():
         except Exception:
             pass
         return False
+
+    def _force_focus_game_window(self):
+        '''
+        Unconditionally (re)assert real keyboard focus on the game window.
+
+        This is the same robust foreground+focus sequence used inside
+        ensure_game_window_active's fallback path, but factored out so it
+        can also run when the window merely *looks* active (is_active True).
+
+        Steps: locate HWND via tokens -> AllowSetForegroundWindow(ASFW_ANY)
+        -> restore if iconic -> AttachThreadInput(our<->game) ->
+        BringWindowToTop + SetForegroundWindow + SetFocus -> brief
+        HWND_TOPMOST bounce -> detach (always).
+
+        Returns True on best-effort success, False otherwise.  Safe to call
+        every ~1 s; all failures are swallowed.
+        '''
+        try:
+            import win32gui
+            import win32con
+            import win32process
+            import win32api
+        except Exception:
+            return False
+
+        hwnd = 0
+        try:
+            if self.window_title:
+                hwnd = win32gui.FindWindow(None, self.window_title)
+            if hwnd == 0:
+                found = [0]
+                def _cb(h, _):
+                    try:
+                        if not win32gui.IsWindowVisible(h):
+                            return
+                        if self._title_matches(win32gui.GetWindowText(h)):
+                            found[0] = h
+                    except Exception:
+                        pass
+                try:
+                    win32gui.EnumWindows(_cb, None)
+                except Exception:
+                    pass
+                hwnd = found[0]
+        except Exception:
+            return False
+
+        if hwnd == 0:
+            return False
+
+        try:
+            try:
+                _USER32.AllowSetForegroundWindow(-1)  # ASFW_ANY
+            except Exception:
+                pass
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+
+            game_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+            my_tid = win32api.GetCurrentThreadId()
+            attached = False
+            if game_tid and game_tid != my_tid:
+                try:
+                    win32process.AttachThreadInput(my_tid, game_tid, True)
+                    attached = True
+                except Exception:
+                    attached = False
+            try:
+                for _fn in (lambda: win32gui.BringWindowToTop(hwnd),
+                            lambda: win32gui.SetForegroundWindow(hwnd),
+                            lambda: win32gui.SetFocus(hwnd)):
+                    try:
+                        _fn()
+                    except Exception:
+                        pass
+                try:
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                                          win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+                    time.sleep(0.02)
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                                          win32con.SWP_NOMOVE | win32con.SWP_NOSIZE |
+                                          win32con.SWP_NOACTIVATE)
+                except Exception:
+                    pass
+            finally:
+                if attached:
+                    try:
+                        win32process.AttachThreadInput(my_tid, game_tid, False)
+                    except Exception:
+                        pass
+            return True
+        except Exception:
+            return False
 
     def release_all_key(self):
         '''
