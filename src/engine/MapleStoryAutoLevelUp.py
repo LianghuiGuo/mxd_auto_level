@@ -1738,9 +1738,7 @@ class MapleStoryAutoBot:
         monsters = []
         for monster_name, monster_imgs in self.monsters_info.items():
             for img_monster, mask_monster in monster_imgs:
-                if self.cfg["bot"]["mode"] == "patrol":
-                    pass # Don't detect monster using template in patrol mode
-                elif self.cfg["monster_detect"]["mode"] == "template_free":
+                if self.cfg["monster_detect"]["mode"] == "template_free":
                     # Generate mask where pixel is exactly (0,0,0)
                     black_mask = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
                     # cv2.imshow("Black Pixel Mask", black_mask)
