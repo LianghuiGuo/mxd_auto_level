@@ -223,6 +223,17 @@ class RouteRecorder():
 
         self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
 
+        # Which physical keys mean "jump" / "teleport" on THIS user's client.
+        # Previously the recorder hard-coded "space" for jump, but the jump key
+        # is configurable (e.g. this user uses "alt").  When the configured key
+        # differed from "space", pressing jump while recording was silently
+        # ignored, so a "跳一下再按上" rope climb got recorded as a plain "up"
+        # (grey) with NO jump — and on playback the character just pressed up
+        # at the rope and never climbed.  Read the real keys from config.
+        _key_cfg = self.cfg.get("key") or {}
+        self.jump_key = str(_key_cfg.get("jump", "space")).lower()
+        self.teleport_key = str(_key_cfg.get("teleport", "e")).lower()
+
         # Check create new map directory
         map_dir = os.path.join("minimaps", args.new_map)
         if os.path.exists(map_dir):
@@ -435,7 +446,7 @@ class RouteRecorder():
         action = ""
         is_draw_blob = False
         key_press = self.kb.key_pressing
-        if "space" in key_press:
+        if self.jump_key in key_press:
             if "left" in key_press:
                 action = "left none jump"
             elif "right" in key_press:
@@ -445,7 +456,7 @@ class RouteRecorder():
             else:
                 action = "none none jump"
             is_draw_blob = True
-        elif "e" in key_press: # Teleport skill
+        elif self.teleport_key in key_press: # Teleport skill
             if "left" in key_press:
                 action = "left none teleport"
             elif "right" in key_press:

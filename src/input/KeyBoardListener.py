@@ -37,6 +37,44 @@ class KeyBoardListener():
             keyboard.Key.right: "right",
             keyboard.Key.space: "space"
         }
+        # Special (non-character) keys that can't be read via key.char — e.g.
+        # alt / ctrl / shift used as the jump or teleport key.  Without this,
+        # pressing alt-to-jump during route recording was NEVER captured into
+        # key_pressing, so a "跳一下再按上" rope climb recorded as a plain "up"
+        # (no jump) and playback couldn't climb the rope.  Map the configured
+        # jump/teleport keys to their pynput Key so they show up in
+        # key_pressing under the SAME name the recorder/config expects.
+        _special_name_to_key = {
+            "alt": keyboard.Key.alt,
+            "alt_l": keyboard.Key.alt_l,
+            "alt_r": keyboard.Key.alt_r,
+            "ctrl": keyboard.Key.ctrl,
+            "ctrl_l": keyboard.Key.ctrl_l,
+            "ctrl_r": keyboard.Key.ctrl_r,
+            "shift": keyboard.Key.shift,
+            "shift_l": keyboard.Key.shift_l,
+            "shift_r": keyboard.Key.shift_r,
+            "space": keyboard.Key.space,
+            "up": keyboard.Key.up,
+            "down": keyboard.Key.down,
+            "left": keyboard.Key.left,
+            "right": keyboard.Key.right,
+        }
+        try:
+            _key_cfg = (cfg or {}).get("key") or {}
+            for _logical in ("jump", "teleport"):
+                _phys = str(_key_cfg.get(_logical, "")).lower()
+                _pk = _special_name_to_key.get(_phys)
+                if _pk is not None:
+                    self.movement_keys[_pk] = _phys
+                    # alt/ctrl/shift also emit the _l/_r variants on press;
+                    # map those to the same logical name so either fires.
+                    for _side in ("_l", "_r"):
+                        _variant = _special_name_to_key.get(_phys + _side)
+                        if _variant is not None:
+                            self.movement_keys[_variant] = _phys
+        except Exception:
+            pass
         self.func_keys = {
             getattr(keyboard.Key, f"f{i+1}"): i for i in range(12)
         }
