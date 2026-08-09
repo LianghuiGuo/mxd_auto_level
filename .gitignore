@@ -19,6 +19,9 @@ media/
 # Any git bundle backups (history-rewrite safety copies) — never commit these.
 *.bundle
 
+# Auto-generated absolute-path copy of data.yaml (train.py writes this).
+ml/data.abs.yaml
+
 # Generated YOLO dataset (synthetic images/labels) — do not commit.
 # Keep the empty dir structure via the .gitkeep files below.
 ml/dataset/**

@@ -21,8 +21,39 @@ import argparse
 import os
 import shutil
 
+import yaml
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
+
+
+def make_abs_data_yaml():
+    """Ultralytics resolves a RELATIVE `path:` against its own global datasets
+    dir (e.g. D:\\...\\datasets), not against data.yaml's location, which makes
+    training fail with 'images not found, missing path ...\\datasets\\dataset\\
+    images\\val'.  Rewrite `path:` to the ABSOLUTE ml/dataset dir into a temp
+    yaml so training works the same on every machine/OS without hand-editing.
+    Also validates that train/val actually contain images."""
+    src = os.path.join(HERE, "data.yaml")
+    with open(src, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    cfg["path"] = os.path.join(HERE, "dataset")
+
+    # sanity-check that images exist so we fail with a clear message
+    for split in ("train", "val"):
+        d = os.path.join(cfg["path"], cfg.get(split, f"images/{split}"))
+        n = len([x for x in os.listdir(d)]) if os.path.isdir(d) else 0
+        if n == 0:
+            raise SystemExit(
+                f"No images in {d}.\n"
+                f"Run the synthetic-data generator first:\n"
+                f"    python ml/synth.py --n 800")
+
+    out = os.path.join(HERE, "data.abs.yaml")
+    with open(out, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    return out
 
 
 def main():
@@ -44,7 +75,7 @@ def main():
         raise SystemExit(
             "ultralytics is not installed. Run: pip install ultralytics")
 
-    data_yaml = os.path.join(HERE, "data.yaml")
+    data_yaml = make_abs_data_yaml()
     model = YOLO(args.model)
 
     results = model.train(
