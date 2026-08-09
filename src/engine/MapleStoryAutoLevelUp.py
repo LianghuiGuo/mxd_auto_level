@@ -709,12 +709,35 @@ class MapleStoryAutoBot:
             ui_y_start = int(self.cfg["ui_coords"]["ui_y_start"])
         except Exception:
             ui_y_start = int(H * 0.80)
+        # Vertical playfield band (name must sit above the HP/EXP UI and below
+        # the very top chrome).  Horizontal span is now nearly full-width to
+        # match the widened SEARCH ROI so a character at the far-left/right
+        # screen edge is still accepted.
         PLAY_Y_LO  = int(H * 0.06)
         PLAY_Y_HI  = max(int(H * 0.80), ui_y_start - 8)
-        PLAY_X_LO  = int(W * 0.14)
-        PLAY_X_HI  = int(W * 0.64)
-        geom_violation = not (PLAY_X_LO <= nx <= PLAY_X_HI and
-                              PLAY_Y_LO <= ny <= PLAY_Y_HI)
+        PLAY_X_LO  = int(W * 0.02)
+        PLAY_X_HI  = int(W * 0.98)
+        in_band = (PLAY_X_LO <= nx <= PLAY_X_HI and
+                   PLAY_Y_LO <= ny <= PLAY_Y_HI)
+
+        # Targeted exclusion: the CN client renders the character's OWN name in
+        # the top-right status panel using the same font/colour as the
+        # above-head nametag.  That panel lives in a small rectangle high up on
+        # the right side (small y, large x).  Carve out ONLY that rectangle so
+        # we still detect the real nametag everywhere else (including the far
+        # right edge, where the character can legitimately stand).
+        INFO_PANEL_X_LO = int(W * 0.66)   # right third...
+        INFO_PANEL_Y_HI = int(H * 0.22)   # ...but only the top ~22% (panel)
+        in_info_panel = (nx >= INFO_PANEL_X_LO and ny <= INFO_PANEL_Y_HI)
+
+        # Same idea for the top-left minimap / chat corner (small x, small y):
+        # exclude only that rectangle so widening the search ROI leftwards does
+        # not start matching minimap labels.
+        MINIMAP_X_HI = int(W * 0.14)
+        MINIMAP_Y_HI = int(H * 0.30)
+        in_minimap = (nx <= MINIMAP_X_HI and ny <= MINIMAP_Y_HI)
+
+        geom_violation = (not in_band) or in_info_panel or in_minimap
 
         self._nt_track_frames.append((loc_nametag_abs, loc_player_abs))
         if len(self._nt_track_frames) > self._nt_track_len:
@@ -816,8 +839,18 @@ class MapleStoryAutoBot:
         # character-info panel name.
         H_full, W_full = self.img_frame_gray.shape[:2]
         ui_y_start     = int(self.cfg["ui_coords"]["ui_y_start"])
-        PFX_X_LO = int(W_full * 0.14)
-        PFX_X_HI = int(W_full * 0.64)
+        # Horizontal search span: previously clamped to 14%~64% so the match
+        # could never wander into the left minimap/chat or the right-hand
+        # character-info panel.  Side-effect: when the character walked to the
+        # far-LEFT or far-RIGHT screen edge, its above-head nametag fell
+        # outside this band and detection dropped out entirely (the symptom
+        # the user hit).  We now search almost the full width; the top-right
+        # info-panel is instead excluded by a targeted RECTANGLE in the
+        # geometric false-positive filter (see _is_nametag_false_positive),
+        # which only carves out that small high-y=small / large-x corner
+        # rather than the whole right third of the screen.
+        PFX_X_LO = int(W_full * 0.02)
+        PFX_X_HI = int(W_full * 0.98)
         PFX_Y_LO = int(H_full * 0.10)
         # BUG-FIX: the old bottom bound (ui_y_start - 20% of H) cut the search
         # region off at y≈470 on a 700px frame.  A character standing on a LOW
