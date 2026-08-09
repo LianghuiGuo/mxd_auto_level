@@ -158,6 +158,8 @@ monster_detect:
   with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
   hp_bar_color: [71, 204, 64]  # 💚 Enemy HP bar color (in BGR format)
   max_mob_area_trigger: 1500   # 📏 How much does the mob need to overlap with attack range to be considered as a target
+  max_matches_per_template: 60 # 🧮 Hard cap on raw template-match points kept per template (before NMS). Guards against a mismatched template producing thousands of false positives that freeze the viz.
+  max_monsters: 40             # 🧮 Hard cap on final monster boxes after NMS (protects the debug viz + attack logic from explosions).
 
 channel_change:
   # 🔁 Auto change channel when other player detected
@@ -347,6 +349,7 @@ system:
   fps_limit_main: 10                # 🚥 Main loop FPS – controls how fast the main thread runs
   fps_limit_keyboard_controller: 30 # 🚥 Keyboard controller thread FPS
   fps_limit_window_capturor: 15     # 🚥 Window capture thread FPS
+  fps_limit_debug_viz: 8            # 🚥 Max FPS for the Game Window Viz emit (throttled so a slow UI can't freeze the window)
   fps_limit_route_recorder: 10      # 🚥 Route recorder FPS
   fps_limit_auto_dice_roller: 1     # 🚥 Auto rice roller FPS
   key_debounce_interval: 1          # ⏱️ Cooldown (in seconds) between function key presses (e.g., F1, F2...)

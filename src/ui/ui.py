@@ -961,15 +961,22 @@ class MainWindow(QMainWindow):
             return
 
         height, width, _ = img.shape
-        qimg = QImage(img.data, width, height, QImage.Format_BGR888)
+        # Build the QImage on a contiguous buffer and copy() it so the pixmap
+        # doesn't alias the (soon-to-be-freed) numpy frame.
+        qimg = QImage(img.data, width, height, 3 * width,
+                      QImage.Format_BGR888).copy()
         pixmap = QPixmap.fromImage(qimg)
 
-        # Scale the image to fit label size but maintain aspect ratio
+        # Scale the image to fit label size but maintain aspect ratio.
+        # FastTransformation (nearest-neighbour) is used instead of
+        # SmoothTransformation: for a live monitoring canvas the quality
+        # difference is negligible but the CPU cost is much lower, which keeps
+        # the UI thread from stuttering when the debug frame is busy.
         scaled_pixmap = pixmap.scaled(
                             self.debug_canvas.width(),
                             self.debug_canvas.height(),
                             Qt.KeepAspectRatio,
-                            Qt.SmoothTransformation)
+                            Qt.FastTransformation)
 
         self.debug_canvas.setPixmap(scaled_pixmap)
 

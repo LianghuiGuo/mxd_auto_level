@@ -179,12 +179,18 @@ def nms(monsters, iou_threshold=0.3):
     boxes = []
     for m in monsters:
         x, y = m["position"]
-        w, h = m["size"]
+        # NOTE: "size" is stored as (h, w) throughout the detector, so unpack
+        # in that order (previously this was (w, h), which swapped the axes
+        # and made IoU meaningless for non-square templates).
+        h, w = m["size"]
         # [x1, y1, x2, y2, score, original_data]
         boxes.append([x, y, x + w, y + h, m["score"], m])
 
-    # Sort by score descending
-    boxes.sort(key=lambda x: x[4], reverse=True)
+    # Sort so the *best* match is processed first.  Template matching here
+    # uses TM_SQDIFF_NORMED where a LOWER score is a better match, so we must
+    # sort ascending.  Sorting descending (the old behaviour) kept the worst
+    # overlapping detections and let dense false-positive clusters survive.
+    boxes.sort(key=lambda x: x[4])
 
     keep = []
     while boxes:

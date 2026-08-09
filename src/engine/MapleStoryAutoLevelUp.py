@@ -1679,6 +1679,38 @@ class MapleStoryAutoBot:
 
         return nearest_monster
 
+    def _top_match_points(self, res, match_locations):
+        '''
+        Keep only the best (lowest TM_SQDIFF_NORMED score) match points for a
+        single template, capped at cfg.monster_detect.max_matches_per_template.
+
+        A template that does not match the current client's sprites can pass
+        the (loose) diff threshold at thousands of pixel positions.  Feeding all
+        of those into the monster list produced the 400+ box explosions that
+        froze the Game Window Viz and made the bot attack empty ground.  By
+        capping to the few strongest points per template we bound the work and
+        let NMS collapse the rest.
+
+        Returns a list of (x, y) points in ROI coordinates.
+        '''
+        ys, xs = match_locations
+        if len(xs) == 0:
+            return []
+
+        try:
+            cap = int(self.cfg["monster_detect"].get("max_matches_per_template", 60))
+        except Exception:
+            cap = 60
+        cap = max(1, cap)
+
+        if len(xs) <= cap:
+            return list(zip(xs, ys))
+
+        scores = res[ys, xs]
+        # np.argpartition gives us the `cap` smallest scores (best matches)
+        best_idx = np.argpartition(scores, cap - 1)[:cap]
+        return list(zip(xs[best_idx], ys[best_idx]))
+
     def get_monsters_in_range(self, top_left, bottom_right):
         '''
         get_monsters_in_range
@@ -1764,7 +1796,7 @@ class MapleStoryAutoBot:
                     match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
 
                     h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
+                    for pt in self._top_match_points(res, match_locations):
                         monsters.append({
                             "name": monster_name,
                             "position": (pt[0] + x0, pt[1] + y0),
@@ -1781,7 +1813,7 @@ class MapleStoryAutoBot:
                             mask=mask_monster)
                     match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
                     h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
+                    for pt in self._top_match_points(res, match_locations):
                         monsters.append({
                             "name": monster_name,
                             "position": (pt[0] + x0, pt[1] + y0),
@@ -1796,7 +1828,7 @@ class MapleStoryAutoBot:
                             mask=mask_monster)
                     match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
                     h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
+                    for pt in self._top_match_points(res, match_locations):
                         monsters.append({
                             "name": monster_name,
                             "position": (pt[0] + x0, pt[1] + y0),
@@ -1809,6 +1841,18 @@ class MapleStoryAutoBot:
 
         # Apply Non-Maximum Suppression to monster detection
         monsters = nms(monsters, iou_threshold=0.4)
+
+        # Hard cap the final monster list.  Even after NMS a badly-matching
+        # template set can leave dozens of scattered false positives; keeping
+        # only the strongest (lowest SQDIFF score) N protects the attack logic
+        # and the debug viz from box explosions.
+        try:
+            max_monsters = int(self.cfg["monster_detect"].get("max_monsters", 40))
+        except Exception:
+            max_monsters = 40
+        if max_monsters > 0 and len(monsters) > max_monsters:
+            monsters.sort(key=lambda m: m.get("score", 1.0))
+            monsters = monsters[:max_monsters]
 
         # Detect monster via health bar
         if self.cfg["monster_detect"]["with_enemy_hp_bar"]:
@@ -2840,12 +2884,29 @@ class MapleStoryAutoBot:
                 # command *towards* the mob first, then attack when in range.
                 # ------------------------------------------------------------
                 _used_fallback_box = False
-                if full_count > 0 and all_mobs is not None:
+                extra_bogus = False
+                # Only trust the full-frame fallback when it returns a *sane*
+                # number of monsters.  A full-frame scan that comes back with
+                # dozens of boxes means the template simply mismatches the
+                # current client sprites (the 418-box explosion), NOT that
+                # there are 418 real monsters.  Promoting that list into
+                # self.monsters made the bot flail at empty ground and flooded
+                # the viz, so we ignore obviously-bogus full-frame results.
+                try:
+                    _fb_cap = int(self.cfg["monster_detect"].get("max_monsters", 40))
+                except Exception:
+                    _fb_cap = 40
+                if 0 < full_count <= _fb_cap and all_mobs is not None:
                     try:
                         self.monsters = all_mobs
                         _used_fallback_box = True
                     except Exception:
                         pass
+                elif full_count > _fb_cap:
+                    # Bogus explosion: keep monsters empty (skip attack) and let
+                    # the DIAG_EMPTY line below report the abnormal count so the
+                    # user knows the template set needs recapturing.
+                    extra_bogus = True
                 elif grayscale_count > 0:
                     # grayscale fallback found mobs when contour/default didn't
                     try:
@@ -2888,6 +2949,11 @@ class MapleStoryAutoBot:
                     extra = []
                     if _used_fallback_box:
                         extra.append("used_fallback_box=yes")
+                    if extra_bogus:
+                        extra.append(
+                            f"full_scan_rejected=yes (count={full_count} > "
+                            f"max_monsters={_fb_cap}; template set likely "
+                            "mismatches this client — recapture monster/<name>/*.png)")
                     # VIZ: cache FULL/GRAYSCALE counters on the class so
                     # the on-screen status line (drawn by update_info_on_img
                     # can display them for users who only look at the cv2
@@ -3522,7 +3588,17 @@ class MapleStoryAutoBot:
                 # Draw image on debug window
                 if self.is_show_debug_window and self.is_ui:
                     try:
-                        if self.img_frame_debug is not None:
+                        # Throttle the viz emit so a slow UI thread can't back
+                        # up the Qt event queue and make the whole window feel
+                        # frozen.  Cap viz refresh at ~8 FPS regardless of the
+                        # main loop rate; the bot logic keeps running full speed.
+                        _now_emit = time.time()
+                        _viz_min_dt = 1.0 / float(
+                            self.cfg["system"].get("fps_limit_debug_viz", 8) or 8)
+                        _last_emit = getattr(self, "_last_viz_emit_t", 0.0)
+                        if self.img_frame_debug is not None and \
+                                (_now_emit - _last_emit) >= _viz_min_dt:
+                            self._last_viz_emit_t = _now_emit
                             img_frame_debug_emit = self.img_frame_debug[:
                                 self.cfg["ui_coords"]["ui_y_start"], :].copy()
                             self.image_debug_signal.emit(img_frame_debug_emit)
