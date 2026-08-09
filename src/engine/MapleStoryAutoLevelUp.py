@@ -1650,7 +1650,11 @@ class MapleStoryAutoBot:
         min_distance = float('inf')
         for monster in self.monsters:
             mx1, my1 = monster["position"]
-            mw, mh = monster["size"]
+            # NOTE: "size" is stored as (h, w) everywhere in the detector.
+            # It was previously unpacked as (w, h) here, swapping the axes and
+            # corrupting the intersection-area test (a major reason mobs in
+            # range still produced nearest=None).
+            mh, mw = monster["size"]
             mx2 = mx1 + mw
             my2 = my1 + mh
 
@@ -2527,7 +2531,7 @@ class MapleStoryAutoBot:
         distance_left = float('inf')
         if monster_left is not None:
             mx, my = monster_left["position"]
-            mw, mh = monster_left["size"]
+            mh, mw = monster_left["size"]  # size is (h, w)
             center_left = (mx + mw // 2, my + mh // 2)
             distance_left = abs(center_left[0] - self.loc_player[0]) + \
                             abs(center_left[1] - self.loc_player[1])
@@ -2535,7 +2539,7 @@ class MapleStoryAutoBot:
         distance_right = float('inf')
         if monster_right is not None:
             mx, my = monster_right["position"]
-            mw, mh = monster_right["size"]
+            mh, mw = monster_right["size"]  # size is (h, w)
             center_right = (mx + mw // 2, my + mh // 2)
             distance_right = abs(center_right[0] - self.loc_player[0]) + \
                             abs(center_right[1] - self.loc_player[1])
@@ -2548,7 +2552,7 @@ class MapleStoryAutoBot:
             if monster is None:
                 return False
             mx, my = monster["position"]
-            mw, mh = monster["size"]
+            mh, mw = monster["size"]  # size is (h, w)
             monster_center_x = mx + mw // 2
             player_x = self.loc_player[0]
 
