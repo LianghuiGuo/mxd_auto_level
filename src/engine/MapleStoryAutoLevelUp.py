@@ -2779,6 +2779,10 @@ class MapleStoryAutoBot:
             )
 
     def update_cmd_by_mob_detection(self):
+        # Reset the per-frame "there is a monster we can attack" flag.  It is
+        # set below when a target is found and consumed by the FSM state to
+        # give attacks priority over route/random movement commands.
+        self._has_attackable_target = False
         # Get monster search box
         margin = self.cfg["monster_detect"]["search_box_margin"]
         if self.cfg["bot"]["attack"] == "aoe_skill":
@@ -2855,7 +2859,7 @@ class MapleStoryAutoBot:
                                     orig_mode = self.cfg["monster_detect"]["mode"]
                                     _saved_th = self.cfg["monster_detect"].get("diff_thres", 0.8)
                                     self.cfg["monster_detect"]["mode"] = "grayscale"
-                                    self.cfg["monster_detect"]["diff_thres"] = max(0.85, _saved_th)
+                                    self.cfg["monster_detect"]["diff_thres"] = min(0.35, _saved_th)
                                     try:
                                         mobs_gray = self.get_monsters_in_range((0, 0), (W, H))
                                         grayscale_count = len(mobs_gray)
@@ -2920,7 +2924,7 @@ class MapleStoryAutoBot:
                         orig_th   = self.cfg["monster_detect"].get("diff_thres", 0.8)
                         try:
                             self.cfg["monster_detect"]["mode"] = "grayscale"
-                            self.cfg["monster_detect"]["diff_thres"] = max(0.85, orig_th)
+                            self.cfg["monster_detect"]["diff_thres"] = min(0.35, orig_th)
                             _m = self.get_monsters_in_range((0, 0), (W, H))
                             self.monsters = _m
                             _used_fallback_box = True
@@ -3012,9 +3016,13 @@ class MapleStoryAutoBot:
             if self.monsters:
                 nearest_info = (self.monsters[0].get("name","?"),
                                 self.monsters[0].get("position", (0,0)))
+                self._has_attackable_target = True
             if time.time() - self.t_last_attack > cooldown:
                 self.cmd_action = "attack"
                 self.t_last_attack = time.time()
+            elif self.monsters and self.cmd_action in ("jump", "goal"):
+                # On cooldown but mobs present: don't jump away.
+                self.cmd_action = "none"
 
         elif self.cfg["bot"]["attack"] == "directional":
             # Get nearest monster to player
@@ -3032,11 +3040,28 @@ class MapleStoryAutoBot:
                        monster_right.get("position",(0,0)), "R")
                 if nearest_info is None:
                     nearest_info = nr
+            # ATTACK PRIORITY: whenever there is a monster we could attack in
+            # range this frame, mark it so the route/random logic in the state
+            # machine does NOT overwrite the attack with a jump/goal/random
+            # move (which previously made the character "only jump, never
+            # attack" — see hunting.py).
+            if attack_direction is not None:
+                self._has_attackable_target = True
+
             # Attack Command
             if time.time() - self.t_last_attack > cooldown and attack_direction is not None:
                 self.cmd_action = "attack"
                 self.t_last_attack = time.time()
                 # Set up attack direction
+                self.cmd_move_x = attack_direction
+            elif attack_direction is not None:
+                # There IS a monster in range but we're still on attack
+                # cooldown.  Don't let a leftover route command (jump/goal)
+                # ride through as the action this frame — hold the action so
+                # the character faces/waits for the mob instead of jumping
+                # away.  Keep the movement direction pointing at the mob.
+                if self.cmd_action in ("jump", "goal"):
+                    self.cmd_action = "none"
                 self.cmd_move_x = attack_direction
 
         # VIZ: cache the non-empty-box counters on the instance so the

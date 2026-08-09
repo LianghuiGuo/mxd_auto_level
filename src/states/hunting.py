@@ -66,8 +66,14 @@ class HuntingState(State):
             # Get attack commend by detecting mobs near players
             self.bot.update_cmd_by_mob_detection()
 
-        # If player stuck for too long, perform a random command
-        if self.bot.is_player_stuck():
+        # If player stuck for too long, perform a random command.
+        # ATTACK PRIORITY: never let the random "unstuck" jump/move overwrite a
+        # real attack. When there's a monster we can attack in range this
+        # frame, the character should keep attacking instead of jumping away
+        # (this was the main cause of "detects mobs but only jumps, never
+        # attacks").
+        if not getattr(self.bot, "_has_attackable_target", False) \
+                and self.bot.is_player_stuck():
             self.bot.update_cmd_by_random()
 
         # send command to keyboard controller

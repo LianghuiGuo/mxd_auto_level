@@ -152,7 +152,11 @@ monster_detect:
   #   - "template_free" (lightest and fastest, but likely to have many wrong detection)
   # 💡 Feel free to test different modes to find what works best for your setup.
   mode: "contour_only"         # 🧠 Options: "color" "grayscale" "contour_only" "template_free"
-  diff_thres: 0.8              # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match
+  diff_thres: 0.3              # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match.
+                               #    ⚠️ TM_SQDIFF_NORMED: real monsters score ≈0, while plain/gradient/noise
+                               #    backgrounds never drop below ~0.39. Anything above ~0.35 lets the
+                               #    whole screen match (this caused the 400+ false-positive box explosion).
+                               #    Keep this ≤0.35 for "color"/"grayscale" modes.
   search_box_margin: 50        # ➕ Additional margin(in pixels) around the attack box for monster searching
   contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
   with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
