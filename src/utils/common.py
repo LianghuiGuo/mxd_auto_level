@@ -502,20 +502,37 @@ def get_minimap_loc_size(img_frame):
     if best is not None:
         x0, y0, rw, rh = best
         inner = img_frame[y0:y0+rh, x0:x0+rw]
-        # Row brightness: the title strip is light (beige), the map content is
-        # noticeably darker.  Find the first row (top-down) where brightness
-        # drops sharply -> start of the map content area.
+        # Row brightness: the beige title strip on top AND the light bottom
+        # border are both bright (~150-250); the actual map content in between
+        # is dark (~55-100).  Take the CONTIGUOUS dark band as the map area so
+        # we crop off BOTH the title strip above and the extra light strip/
+        # border below (the "下方多出来一块" the user saw).
         row_mean = inner.reshape(rh, -1, 3).mean(axis=(1, 2))
         dark_rows = np.where(row_mean < 120)[0]
         if dark_rows.size > 0:
             map_y0 = int(dark_rows[0])
+            map_y1 = int(dark_rows[-1])
         else:
             map_y0 = int(rh * 0.42)  # fallback: skip ~top 42% (title strip)
-        # Trim 1px border on the remaining sides.
-        x_minimap = x0 + 1
+            map_y1 = rh - 2
+
+        # Column brightness within the dark band trims the left/right borders
+        # the same way (kills the residual black frame on the sides).
+        band = inner[map_y0:map_y1 + 1]
+        col_mean = band.reshape(band.shape[0], -1, 3).mean(axis=(0, 2)) \
+            if band.size else np.array([])
+        dark_cols = np.where(col_mean < 120)[0] if col_mean.size else np.array([])
+        if dark_cols.size > 0:
+            map_x0 = int(dark_cols[0])
+            map_x1 = int(dark_cols[-1])
+        else:
+            map_x0 = 1
+            map_x1 = rw - 2
+
+        x_minimap = x0 + map_x0
         y_minimap = y0 + map_y0
-        w_minimap = rw - 2
-        h_minimap = rh - map_y0 - 1
+        w_minimap = map_x1 - map_x0 + 1
+        h_minimap = map_y1 - map_y0 + 1
         if w_minimap > 40 and h_minimap > 20:
             return x_minimap, y_minimap, w_minimap, h_minimap
 
