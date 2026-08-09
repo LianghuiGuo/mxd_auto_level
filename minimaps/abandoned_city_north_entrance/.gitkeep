@@ -1,0 +1,5 @@
+# Placeholder so this map shows up in the UI map list.
+# Patrol mode does NOT need map.png / route*.png — it only needs this
+# directory to exist (see src/ui/ui.py listing logic) plus the map->mob
+# mapping in config/config_data.yaml. Normal mode WOULD require map.png and
+# route*.png here.
