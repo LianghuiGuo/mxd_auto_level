@@ -13,10 +13,11 @@ test/
 *.exe
 *.spec
 
-# Large asset folders removed from history (see backup_before_rewrite.bundle)
+# Large asset folders removed from history — do not re-add.
 maps/
 media/
-backup_before_rewrite.bundle
+# Any git bundle backups (history-rewrite safety copies) — never commit these.
+*.bundle
 
 # Generated YOLO dataset (synthetic images/labels) — do not commit.
 # Keep the empty dir structure via the .gitkeep files below.
