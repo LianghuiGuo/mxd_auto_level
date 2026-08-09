@@ -723,7 +723,14 @@ def get_all_other_player_locations_on_minimap(img_minimap, red_bgr=(0, 0, 255)):
         if coords is not None and len(coords) >= 3:
             logger.debug(f"Found {len(coords)} red pixels with tolerance {tolerance}")
             logger.debug(f"Color range: {lower_bgr} to {upper_bgr}")
-            return [tuple(pt[0]) for pt in coords]  # List of (x, y)
+            # cv2.findNonZero normally returns shape (N, 1, 2), so pt[0] is
+            # [x, y].  On some degenerate frames it can come back as (N, 2)
+            # (pt[0] is then a scalar np.int32), which made `tuple(pt[0])`
+            # raise "'numpy.int32' object is not iterable" and crash the whole
+            # frame loop every tick (bot appeared frozen).  Flatten to (N, 2)
+            # so unpacking is always correct regardless of the returned shape.
+            pts = np.asarray(coords).reshape(-1, 2)
+            return [(int(x), int(y)) for x, y in pts]  # List of (x, y)
 
     # 如果所有容錯範圍都檢測不到，記錄調試信息
     logger.debug(f"Red dot detection failed with all tolerances: {tolerances}")
