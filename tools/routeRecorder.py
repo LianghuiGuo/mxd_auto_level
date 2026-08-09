@@ -475,11 +475,6 @@ class RouteRecorder():
                 action = "left none jump"
             elif "right" in key_press:
                 action = "right none jump"
-            elif "up" in key_press:
-                # jump + up = climb a rope ("跳一下再按上").  Previously the
-                # jump branch ignored up, so this recorded as a plain vertical
-                # "none none jump" and playback could never climb.
-                action = "none up jump"
             elif "down" in key_press:
                 action = "none down jump"
             else:

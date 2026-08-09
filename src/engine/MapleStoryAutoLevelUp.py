@@ -849,8 +849,15 @@ class MapleStoryAutoBot:
         # geometric false-positive filter (see _is_nametag_false_positive),
         # which only carves out that small high-y=small / large-x corner
         # rather than the whole right third of the screen.
-        PFX_X_LO = int(W_full * 0.02)
-        PFX_X_HI = int(W_full * 0.98)
+        # Full-width search.  Previously clamped to 2%~98%, which cut off the
+        # character's above-head nametag whenever it walked to the far-LEFT (or
+        # far-RIGHT) screen edge — the nametag partly fell outside the band so
+        # matching dropped out entirely (the symptom: "走到最左侧就匹配不到").
+        # UI elements (top-left minimap/chat, top-right info panel) are excluded
+        # by the targeted rectangles in _is_nametag_false_positive instead, so
+        # searching the whole width is safe.
+        PFX_X_LO = 0
+        PFX_X_HI = W_full
         PFX_Y_LO = int(H_full * 0.10)
         # BUG-FIX: the old bottom bound (ui_y_start - 20% of H) cut the search
         # region off at y≈470 on a 700px frame.  A character standing on a LOW
