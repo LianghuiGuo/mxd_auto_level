@@ -3221,6 +3221,14 @@ class MapleStoryAutoBot:
 
         self.profiler.start()
 
+        # Reset the per-frame mob-detection guard at the TOP of the frame so the
+        # FSM state (which runs before the run_once-level detection call) sees a
+        # fresh False and runs mob detection itself with THIS frame's data.
+        # Otherwise it stayed True from the previous frame's tail call, the
+        # state skipped detection, and patrol read a stale _has_attackable_target
+        # → wrong walk/attack direction.
+        self._mob_detection_ran_this_frame = False
+
         # Check if need viz window
         self.is_show_debug_window = self.is_need_show_debug_window
 
@@ -3552,7 +3560,13 @@ class MapleStoryAutoBot:
         # is_show_debug_window is True/False).
         # ================================================================
         try:
-            self.update_cmd_by_mob_detection()
+            # The FSM state (e.g. PatrolState) may already have run mob
+            # detection this frame with the same data.  Don't run it twice:
+            # besides wasting a full template-match pass, a second call would
+            # recompute against an identical frame and could disturb the
+            # attack-cooldown bookkeeping.
+            if not getattr(self, "_mob_detection_ran_this_frame", False):
+                self.update_cmd_by_mob_detection()
             self._mob_detection_ran_this_frame = True
         except Exception as _e_mob:
             logger.warning(f"[run_once] update_cmd_by_mob_detection raised: {_e_mob}")

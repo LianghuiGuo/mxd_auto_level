@@ -61,22 +61,29 @@ class PatrolState(State):
             self.is_patrol_to_left = not self.is_patrol_to_left
             self.patrol_turn_point_cnt = 0
 
-        # Update cmd_move_x
-        if self.is_patrol_to_left:
-            self.bot.cmd_move_x = "left"
-        else:
-            self.bot.cmd_move_x = "right"
+        # Decide the patrol walk direction for THIS frame (used only when there
+        # is no monster to attack).
+        patrol_dir = "left" if self.is_patrol_to_left else "right"
 
-        # Update attack commend by detecting mobs near players
-        # (hoisted to run_once; only call here in legacy/non-run_once callers).
+        # Run monster detection FIRST (if it hasn't already been hoisted into
+        # run_once this frame).  It sets cmd_action="attack" and points
+        # cmd_move_x at the monster whenever one is inside the attack box.
         if not getattr(self.bot, "_mob_detection_ran_this_frame", False):
             self.bot.update_cmd_by_mob_detection()
+            self.bot._mob_detection_ran_this_frame = True
 
-        # Attacks are now driven purely by monster detection above
-        # (update_cmd_by_mob_detection sets cmd_action="attack" only when a
-        # monster is actually inside the directional-attack search box).  The
-        # old fixed-interval "blind attack" (patrol_attack_interval) has been
+        # Attacks are driven purely by monster detection.  The old
+        # fixed-interval "blind attack" (patrol_attack_interval) has been
         # removed so the character only attacks when a monster is detected.
+        #
+        # CRITICAL: only overwrite cmd_move_x with the patrol walk direction
+        # when there is NO attackable monster this frame.  Otherwise we would
+        # clobber the attack-facing direction that update_cmd_by_mob_detection
+        # just set (mob on the left, patrol walking right), which made the
+        # character jitter its facing every frame and effectively never land an
+        # attack.
+        if not getattr(self.bot, "_has_attackable_target", False):
+            self.bot.cmd_move_x = patrol_dir
 
         # If player stuck for too long, perform a random command — but never
         # override a real attack we just decided on from mob detection.
