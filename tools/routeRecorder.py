@@ -538,11 +538,20 @@ class RouteRecorder():
                     px_last, py_last = self.loc_player_global
                 else:
                     px_last, py_last = self.loc_player_global_last
-                cv2.line(self.img_route,
-                        (px_last, py_last),
-                        (px     , py),
-                        color=color_bgr,
-                        thickness=1)
+                # Guard against a spurious long streak.  On the very first
+                # recorded frame (or right after un-pausing / a global-match
+                # glitch) loc_player_global_last can still hold the initial
+                # (0,0), which drew a long red line from the top-left corner to
+                # the character (the reported bug).  A real per-frame step is
+                # small, so if the segment is implausibly long, skip drawing it
+                # and only update the anchor.
+                seg_len = abs(px - px_last) + abs(py - py_last)
+                if seg_len <= 30:
+                    cv2.line(self.img_route,
+                            (px_last, py_last),
+                            (px     , py),
+                            color=color_bgr,
+                            thickness=1)
                 self.loc_player_global_last = self.loc_player_global
 
         # Save route image if goal is drawn

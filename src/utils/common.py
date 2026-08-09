@@ -550,20 +550,28 @@ def get_minimap_loc_size(img_frame, manual_roi=None):
                 best_s, best_e = s, len(vals) - 1
             return best_s, best_e
 
-        map_y0, map_y1 = _longest_dark_run(row_mean)
-        if map_y0 < 0:
+        # Use the longest dark run ONLY to locate where the beige title strip
+        # ends (its start = top of the real map content).  Do NOT use its END
+        # as the map bottom: the player's YELLOW dot and bright platforms are
+        # *bright*, so they break the dark run — using its end cropped the map
+        # so tightly that most of the yellow dot was cut off (only ~24 of 171
+        # px survived), and on slopes / edges the remaining pixels dropped
+        # below the 4-px detection floor, freezing route recording (the
+        # "走斜坡就不录制" / "最开始能录斜坡" regression).  Instead, keep the
+        # map extending down to the frame's bottom border minus a thin margin,
+        # so the full dot and platforms stay inside the crop.
+        run_s, run_e = _longest_dark_run(row_mean)
+        if run_s < 0:
             map_y0 = int(rh * 0.42)  # fallback: skip ~top 42% (title strip)
-            map_y1 = rh - 2
+        else:
+            map_y0 = run_s
+        BORDER = 2  # dark-brown frame is ~1-2 px thick
+        map_y1 = rh - 1 - BORDER
 
-        # Column brightness within the dark band trims the left/right borders
-        # the same way (kills the residual black frame on the sides).
-        band = inner[map_y0:map_y1 + 1]
-        col_mean = band.reshape(band.shape[0], -1, 3).mean(axis=(0, 2)) \
-            if band.size else np.array([])
-        map_x0, map_x1 = _longest_dark_run(col_mean) if col_mean.size else (-1, -1)
-        if map_x0 < 0:
-            map_x0 = 1
-            map_x1 = rw - 2
+        # Left/right: just trim the thin border, keep full width (the dot can
+        # sit anywhere horizontally, including near the edges on slopes).
+        map_x0 = BORDER
+        map_x1 = rw - 1 - BORDER
 
         x_minimap = x0 + map_x0
         y_minimap = y0 + map_y0
@@ -629,6 +637,24 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
             # unambiguous and returns row (y) / col (x) index arrays.
             ys, xs = np.where(mask > 0)
             return (int(round(float(xs.mean()))), int(round(float(ys.mean()))))
+
+    # --- Robust "yellowness" fallback --------------------------------------
+    # The reference-colour + tolerance approach fails when the client's player
+    # dot differs a lot from the configured BGR (e.g. this user's dot is
+    # (50,255,238) but default is (136,255,255) — the Blue channel alone is
+    # 86 apart, outside even the widest ±60 window, so on darker frames like a
+    # slope the dot vanished and route recording stalled).  A yellow dot is
+    # defined structurally: GREEN and RED both high, BLUE clearly lower.  Match
+    # that directly so ANY yellow player dot is found regardless of exact hue.
+    b = img_minimap[:, :, 0].astype(np.int16)
+    g = img_minimap[:, :, 1].astype(np.int16)
+    r = img_minimap[:, :, 2].astype(np.int16)
+    yellow = ((g >= 170) & (r >= 170) &
+              (g.astype(np.int32) + r - 2 * b >= 150)).astype(np.uint8)
+    n_y = int(yellow.sum())
+    if n_y >= 4:
+        ys, xs = np.where(yellow > 0)
+        return (int(round(float(xs.mean()))), int(round(float(ys.mean()))))
 
     # --- Diagnostic path: all tolerances failed. ---------------------------
     # Dump the last (widest-tolerance) mask so the user can visualise what
