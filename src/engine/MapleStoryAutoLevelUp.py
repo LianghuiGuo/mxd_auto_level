@@ -3229,7 +3229,9 @@ class MapleStoryAutoBot:
         ### Get Minimap ###
         ###################
         # Get minimap coordinate and size on game window
-        minimap_result = get_minimap_loc_size(self.img_frame)
+        _manual_roi = (self.cfg.get("minimap") or {}).get("manual_roi")
+        minimap_result = get_minimap_loc_size(self.img_frame,
+                                              manual_roi=_manual_roi)
         if minimap_result is None:
             if time.time() - self.t_last_minimap_update > 30:
                 # Unable to get minimap for 30 seconds -> assume it's login screen
@@ -3244,11 +3246,21 @@ class MapleStoryAutoBot:
                     time.sleep(2)
         else:
             x, y, w, h = minimap_result
-            # Shrink minimap boardary by one pixel to avoid pixel leaking to minimap
-            x += 1
-            y += 1
-            w -= 2
-            h -= 2
+            # Shrink minimap boundary by one pixel to avoid the white/brown
+            # border leaking into the minimap crop — but ONLY for the
+            # auto-detected rectangle.  This MUST mirror the route recorder
+            # (tools/routeRecorder.py) exactly: the recorder also does this
+            # +1/-2 only when manual_roi is None.  If the two disagree, the
+            # minimap the recorder saved into map.png is offset from the one
+            # the engine crops at runtime, so minimap→map template matching
+            # fails (score=1.0) and, more visibly, the recorded route sits a
+            # couple of pixels off from the live player position — exactly the
+            # "路线比真实点向左偏 2 像素" the user reported.
+            if _manual_roi is None:
+                x += 1
+                y += 1
+                w -= 2
+                h -= 2
             # update minimap image
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
