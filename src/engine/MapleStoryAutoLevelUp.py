@@ -2533,13 +2533,25 @@ class MapleStoryAutoBot:
             elif right_valid and not left_valid:
                 attack_direction = "right"
                 # nearest_monster = monster_right
-            elif left_valid and right_valid and distance_left < distance_right - 50:
-                attack_direction = "left"
-                # nearest_monster = monster_left
-            elif left_valid and right_valid and distance_right < distance_left - 50:
-                attack_direction = "right"
-                # nearest_monster = monster_right
-            # If both valid but distances too close, don't attack to avoid confusion
+            elif left_valid and right_valid:
+                # Both sides have valid monsters.  Previously we required one
+                # side to be at least 50px CLOSER, otherwise refused to attack
+                # ("avoid confusion").  On dense maps (e.g. 蘑菇山) monsters
+                # swarm BOTH sides at near-equal distance, so that rule left the
+                # character standing in the middle of the pack taking damage and
+                # never swinging (HP drained to ~2% in the logs).  Instead just
+                # attack the nearer side; on a tie, attack the way we're already
+                # walking so movement and attack stay consistent.
+                if distance_left < distance_right:
+                    attack_direction = "left"
+                elif distance_right < distance_left:
+                    attack_direction = "right"
+                else:
+                    attack_direction = (
+                        self.cmd_move_x
+                        if self.cmd_move_x in ("left", "right")
+                        else "left"
+                    )
 
         # Debug attack direction selection
         if monster_left is not None or monster_right is not None:
