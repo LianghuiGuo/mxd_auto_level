@@ -680,8 +680,18 @@ class MapleStoryAutoBot:
             return True
         W, H = WINDOW_WORKING_SIZE
         nx, ny = loc_nametag_abs
+        # Keep the playfield bottom bound in sync with the nametag SEARCH ROI
+        # (see get_player_location_by_nametag).  Using 0.80*H (=560) here would
+        # convict a perfectly valid name of a character standing on a LOW
+        # platform (y≈600) as a UI false-positive and permanently disable
+        # nametag.  ui_y_start marks the top of the real HP/EXP UI band, so any
+        # name above it is legitimately in the playfield.
+        try:
+            ui_y_start = int(self.cfg["ui_coords"]["ui_y_start"])
+        except Exception:
+            ui_y_start = int(H * 0.80)
         PLAY_Y_LO  = int(H * 0.06)
-        PLAY_Y_HI  = int(H * 0.80)
+        PLAY_Y_HI  = max(int(H * 0.80), ui_y_start - 8)
         PLAY_X_LO  = int(W * 0.14)
         PLAY_X_HI  = int(W * 0.64)
         geom_violation = not (PLAY_X_LO <= nx <= PLAY_X_HI and
@@ -790,7 +800,15 @@ class MapleStoryAutoBot:
         PFX_X_LO = int(W_full * 0.14)
         PFX_X_HI = int(W_full * 0.64)
         PFX_Y_LO = int(H_full * 0.10)
-        PFX_Y_HI = max(PFX_Y_LO + 64, ui_y_start - int(H_full * 0.20))
+        # BUG-FIX: the old bottom bound (ui_y_start - 20% of H) cut the search
+        # region off at y≈470 on a 700px frame.  A character standing on a LOW
+        # platform renders its nametag at y≈600-650, i.e. BELOW that line, so
+        # the name was silently cropped out of the search ROI and never matched
+        # (symptom: nametag only works when the char stands high, otherwise the
+        # bot falls back to camera-center forever).  ui_y_start already marks
+        # where the real bottom UI (HP/EXP bars) begins, so we can safely search
+        # all the way down to it (minus a tiny margin) without hitting the UI.
+        PFX_Y_HI = max(PFX_Y_LO + 64, ui_y_start - 8)
         CROP_DX, CROP_DY = PFX_X_LO, PFX_Y_LO
 
         # Get camera region in the game window
