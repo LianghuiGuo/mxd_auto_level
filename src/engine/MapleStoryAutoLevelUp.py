@@ -254,7 +254,10 @@ class MapleStoryAutoBot:
             for k, v in cfg["route"]["color_code_up_down"].items()
         }
 
-        if cfg["bot"]["mode"] == "normal":
+        # Monster templates are needed by BOTH normal and patrol modes (patrol
+        # now attacks based on monster detection instead of a fixed interval).
+        # Map/route images are only needed by normal mode.
+        if cfg["bot"]["mode"] in ("normal", "patrol"):
             map_name = cfg['bot']['map']
             # Check if the map is supported in config_data.yaml
             if map_name not in self.data["map_mobs_mapping"]:
@@ -264,21 +267,23 @@ class MapleStoryAutoBot:
                 return -1
                 # raise RuntimeError(text)
 
-            # Load map.png from minimaps/
-            self.img_map = load_image(f"minimaps/{map_name}/map.png",
-                                      cv2.IMREAD_COLOR)
-            # Load route*.png from minimaps/
-            route_files = sorted(glob.glob(f"minimaps/{map_name}/route*.png"))
-            route_files = [p for p in route_files if not p.endswith("route_rest.png")]
-            self.img_routes = []
-            for route_file in route_files:
-                img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
-                # Remove pixel in map that is color code
-                img = mask_route_colors(self.img_map, img, cfg["route"]["color_code"])
-                img = mask_route_colors(self.img_map, img, cfg["route"]["color_code_up_down"])
-                self.img_routes.append(img)
+            if cfg["bot"]["mode"] == "normal":
+                # Load map.png from minimaps/
+                self.img_map = load_image(f"minimaps/{map_name}/map.png",
+                                          cv2.IMREAD_COLOR)
+                # Load route*.png from minimaps/
+                route_files = sorted(glob.glob(f"minimaps/{map_name}/route*.png"))
+                route_files = [p for p in route_files if not p.endswith("route_rest.png")]
+                self.img_routes = []
+                for route_file in route_files:
+                    img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
+                    # Remove pixel in map that is color code
+                    img = mask_route_colors(self.img_map, img, cfg["route"]["color_code"])
+                    img = mask_route_colors(self.img_map, img, cfg["route"]["color_code_up_down"])
+                    self.img_routes.append(img)
 
             # Load monsters images from monster/<monster_name>
+            self.monsters_info = {}
             for monster_name in self.data["map_mobs_mapping"][map_name]:
                 imgs = []
                 for file in glob.glob(f"monster/{monster_name}/{monster_name}*.png"):
