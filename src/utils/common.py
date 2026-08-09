@@ -414,51 +414,110 @@ def get_minimap_loc_size(img_frame):
         (x, y, w, h): Top-left coordinate and width/height of the minimap.
                     Returns None if not found.
     '''
-    white = np.array([255, 255, 255])
+    # Try strict pure-white first, then fall back to a "near-white" border
+    # threshold.  Some clients (e.g. 冒险岛怀旧服) frame the minimap with a
+    # multi-layer beige/near-white border whose outermost line is NOT exactly
+    # (255,255,255); the strict test then finds nothing and both the route
+    # recorder and normal-mode minimap→map matching silently fail.  The
+    # near-white pass (every channel >= 250) catches that inner near-white
+    # rim while still being specific enough not to match arbitrary scenery.
+    for white_min in (255, 250):
+        white = np.array([255, 255, 255])
+        lo = np.array([white_min, white_min, white_min])
+        mask_white = cv2.inRange(img_frame, lo, white)
 
-    # Mask for pure white
-    mask_white = cv2.inRange(img_frame, white, white)
+        num_labels, labels, stats, centroids = \
+            cv2.connectedComponentsWithStats(mask_white, connectivity=8)
 
-    # Connected components with stats
+        def _is_white_line(pixels):
+            # A border line counts as white if (near-)white on every pixel.
+            return bool(np.all(np.all(pixels >= white_min, axis=-1)))
+
+        for i in range(1, num_labels):
+            x0, y0, rw, rh, area = stats[i]
+
+            # Filter out small blobs
+            if rw < 100 or rh < 100:
+                continue
+
+            x1 = x0 + rw - 1
+            y1 = y0 + rh - 1
+
+            # Check 1px (near-)white top and bottom margins
+            if not (_is_white_line(img_frame[y0, x0:x0+rw]) and
+                    _is_white_line(img_frame[y1, x0:x0+rw])):
+                continue
+
+            # Check 1px (near-)white left and right margins
+            if not (_is_white_line(img_frame[y0:y0+rh, x0]) and
+                    _is_white_line(img_frame[y0:y0+rh, x1])):
+                continue
+
+            # Create a mask of non-white pixels (content inside the border)
+            mask_minimap = np.any(img_frame[y0:y0+rh, x0:x0+rw] < white_min,
+                                  axis=2).astype(np.uint8)
+
+            coords = cv2.findNonZero(mask_minimap)
+            if coords is None:
+                continue  # skip empty block
+            x_minimap, y_minimap, w_minimap, h_minimap = cv2.boundingRect(coords)
+
+            # Offset by original x0, y0 to get coords in original image
+            x_minimap += x0
+            y_minimap += y0
+
+            return x_minimap, y_minimap, w_minimap, h_minimap
+
+    # --- Fallback: dark-brown hollow frame (冒险岛怀旧服 minimap) -----------
+    # This client draws the minimap panel inside a thin dark-brown border
+    # (~(102,120,137) BGR) with a beige title strip on top and the actual
+    # map area below.  Neither pure-white nor near-white borders exist, so
+    # the two passes above find nothing.  The dark-brown border, however,
+    # forms a clean CLOSED rectangle (a hollow box: high w/h, very low fill
+    # ratio).  Detect that box, then return the darker map-content area
+    # inside it (skipping the lighter title strip).
+    brown_lo = np.array([90, 80, 60])
+    brown_hi = np.array([165, 150, 130])
+    mask_brown = cv2.inRange(img_frame, brown_lo, brown_hi)
+    # The border is a thin, anti-aliased line so its pixels are broken up into
+    # many tiny components; dilate to bridge the gaps into one closed frame.
+    mask_brown = cv2.dilate(mask_brown, np.ones((3, 3), np.uint8), iterations=2)
     num_labels, labels, stats, centroids = \
-        cv2.connectedComponentsWithStats(mask_white, connectivity=8)
-
-    # Loop over components (skip label 0, which is background)
+        cv2.connectedComponentsWithStats(mask_brown, connectivity=8)
+    best = None
     for i in range(1, num_labels):
         x0, y0, rw, rh, area = stats[i]
-
-        # Filter out small blobs
-        if rw < 100 or rh < 100:
+        if rw < 100 or rh < 80:
             continue
-
-        x1 = x0 + rw - 1
-        y1 = y0 + rh - 1
-
-        # Check 1px white top and bottom margins
-        if not (np.all(img_frame[y0, x0:x0+rw] == white) and \
-                np.all(img_frame[y1, x0:x0+rw] == white)):
+        # Minimap sits in the top-left corner of the frame.
+        if x0 > int(img_frame.shape[1] * 0.35) or \
+           y0 > int(img_frame.shape[0] * 0.35):
             continue
-
-        # Check 1px white left and right margins
-        # Ensures the candidate region is framed by white borders like the minimap
-        if not (np.all(img_frame[y0:y0+rh, x0] == white) and \
-                np.all(img_frame[y0:y0+rh, x1] == white)):
+        fill = area / float(rw * rh)
+        # A hollow border frame is mostly empty inside -> low fill ratio.
+        if fill > 0.30:
             continue
-
-        # Create a mask of non-white pixels
-        mask_minimap = np.any(img_frame[y0:y0+rh, x0:x0+rw] != white, axis=2).astype(np.uint8)
-
-        # Find bounding box of mask_minimap
-        coords = cv2.findNonZero(mask_minimap)
-        if coords is None:
-            continue  # skip empty block
-        x_minimap, y_minimap, w_minimap, h_minimap = cv2.boundingRect(coords)
-
-        # Offset by original x0, y0 to get coords in original image
-        x_minimap += x0
-        y_minimap += y0
-
-        return x_minimap, y_minimap, w_minimap, h_minimap
+        if best is None or (rw * rh) > (best[2] * best[3]):
+            best = (x0, y0, rw, rh)
+    if best is not None:
+        x0, y0, rw, rh = best
+        inner = img_frame[y0:y0+rh, x0:x0+rw]
+        # Row brightness: the title strip is light (beige), the map content is
+        # noticeably darker.  Find the first row (top-down) where brightness
+        # drops sharply -> start of the map content area.
+        row_mean = inner.reshape(rh, -1, 3).mean(axis=(1, 2))
+        dark_rows = np.where(row_mean < 120)[0]
+        if dark_rows.size > 0:
+            map_y0 = int(dark_rows[0])
+        else:
+            map_y0 = int(rh * 0.42)  # fallback: skip ~top 42% (title strip)
+        # Trim 1px border on the remaining sides.
+        x_minimap = x0 + 1
+        y_minimap = y0 + map_y0
+        w_minimap = rw - 2
+        h_minimap = rh - map_y0 - 1
+        if w_minimap > 40 and h_minimap > 20:
+            return x_minimap, y_minimap, w_minimap, h_minimap
 
     # logger.warning("Minimap not found in the game frame.")
     return None  # minimap not found

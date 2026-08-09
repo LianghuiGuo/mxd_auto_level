@@ -312,7 +312,31 @@ class RouteRecorder():
 
         # Get minimap from game window
         if self.is_first_frame:
-            x, y, w, h = get_minimap_loc_size(self.img_frame)
+            mm = get_minimap_loc_size(self.img_frame)
+            if mm is None:
+                # Don't crash: the minimap white-frame detector found nothing
+                # (minimap collapsed, or its border isn't pure white(255,255,255)
+                # on this client).  Log once and keep waiting so the user can
+                # open/adjust the minimap without restarting.
+                if not getattr(self, "_mm_warned", False):
+                    self._mm_warned = True
+                    logger.error(
+                        "[RouteRecorder] Minimap not found: need a >=100x100 "
+                        "region framed by a pure-white (255,255,255) 1px border. "
+                        "Make sure the in-game minimap is EXPANDED (not the tiny "
+                        "collapsed bar) and fully visible.  If its border isn't "
+                        "pure white on your client, tell me and I'll relax the "
+                        "detector.  Retrying every frame..."
+                    )
+                # Show the raw frame so the user can see what's captured.
+                try:
+                    cv2.imshow("Game Window Debug",
+                               self.img_frame[:self.cfg["ui_coords"]["ui_y_start"], :])
+                except Exception:
+                    pass
+                self.t_last_frame = time.time()
+                return -1
+            x, y, w, h = mm
             # Discard 1 pixel boundary of the minimap
             x += 1
             y += 1
