@@ -63,8 +63,17 @@ class PatrolState(State):
             self.bot.update_cmd_by_mob_detection()
 
         # Update attack commend by periodically attack
-        if time.time() - self.bot.t_last_attack > \
-            self.bot.cfg["patrol"]["patrol_attack_interval"]:
+        _atk_interval = self.bot.cfg["patrol"]["patrol_attack_interval"]
+        try:
+            from src.utils.logger import logger as _lg
+            _cls = type(self)
+            if getattr(_cls, "_atk_interval_logged", None) != _atk_interval:
+                _cls._atk_interval_logged = _atk_interval
+                _lg.info(f"[Patrol] patrol_attack_interval in effect = "
+                         f"{_atk_interval}s")
+        except Exception:
+            pass
+        if time.time() - self.bot.t_last_attack > _atk_interval:
             self.bot.cmd_action = "attack"
             self.bot.t_last_attack = time.time()
 
