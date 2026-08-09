@@ -17,3 +17,15 @@ test/
 maps/
 media/
 backup_before_rewrite.bundle
+
+# Generated YOLO dataset (synthetic images/labels) — do not commit.
+# Keep the empty dir structure via the .gitkeep files below.
+ml/dataset/**
+!ml/dataset/
+!ml/dataset/images/
+!ml/dataset/images/train/
+!ml/dataset/images/val/
+!ml/dataset/labels/
+!ml/dataset/labels/train/
+!ml/dataset/labels/val/
+!ml/dataset/**/.gitkeep
