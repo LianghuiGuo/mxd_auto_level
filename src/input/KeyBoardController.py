@@ -310,6 +310,41 @@ except Exception:  # pragma: no cover — defensive guard
     _WIN32U = None
     _KERNEL32 = None
 
+# Declare the exact prototypes for the raw user32 entry points we call by
+# hand.  Without an explicit argtypes/restype, ctypes GUESSES the marshalling
+# from the *Python* objects passed in — and when we passed ``ctypes.c_byte``
+# instances by value the scan-code could be sign-extended / mis-packed on the
+# stack, so ``keybd_event`` silently injected a garbage event and the game
+# never moved (the exact "keys=LEFT fires but character stands still even
+# with NO anti-cheat" symptom).  Pinning the prototype makes the call ABI
+# correct and lets us pass plain Python ints.
+if _WIN_OK and _USER32 is not None:
+    try:
+        _USER32.keybd_event.argtypes = [
+            ctypes.c_ubyte,   # bVk
+            ctypes.c_ubyte,   # bScan
+            ctypes.c_uint,    # dwFlags
+            ctypes.c_void_p,  # dwExtraInfo (ULONG_PTR)
+        ]
+        _USER32.keybd_event.restype = None
+    except Exception:
+        pass
+    try:
+        # GetAsyncKeyState returns SHORT; if ctypes defaults restype to c_int
+        # the high "pressed" bit (0x8000) still survives, but pin it for
+        # correctness so the gas-verify never mis-reads a held key.
+        _USER32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        _USER32.GetAsyncKeyState.restype = ctypes.c_short
+    except Exception:
+        pass
+    try:
+        _USER32.SendInput.argtypes = [
+            ctypes.c_uint, ctypes.c_void_p, ctypes.c_int,
+        ]
+        _USER32.SendInput.restype = ctypes.c_uint
+    except Exception:
+        pass
+
 # keybd_event + SendInput flags
 _KEYEVENTF_KEYUP = 0x0002
 _KEYEVENTF_SCANCODE = 0x0008
@@ -1116,6 +1151,12 @@ def key_down(key):
         except Exception:
             vki = 0
         is_arrow = bool(vki in _ARROW_VKS)
+        # This is the key-DOWN path, so the event is always a press.  (The
+        # previous code referenced an undefined ``is_down`` here, which threw
+        # NameError, got swallowed by the surrounding ``except Exception``,
+        # and meant Backend #0 keybd_event NEVER actually fired on key-down —
+        # the root cause of "keys=LEFT logged but character never moves".)
+        is_down = True
         if sc != 0 or not is_arrow:
             try:
                 # Path 0A — scan-code via keybd_event (works for arrows
@@ -1124,14 +1165,8 @@ def key_down(key):
                     fl = _KEYEVENTF_SCANCODE
                     if _is_extended_key(vk):
                         fl |= _KEYEVENTF_EXTENDEDKEY
-                    if not is_down:
-                        fl |= _KEYEVENTF_KEYUP
-                    _USER32.keybd_event(ctypes.c_byte(0),
-                                        ctypes.c_byte(sc & 0xFF),
-                                        ctypes.c_uint(fl),
-                                        ctypes.c_void_p(0))
-                passed_0a = _gas_verify_down(vki) if is_down else \
-                            _gas_verify_up   (vki)
+                    _USER32.keybd_event(0, sc & 0xFF, fl, None)
+                passed_0a = _gas_verify_down(vki)
 
                 if passed_0a and is_arrow:
                     _set_backend("keybd_sc", True)
@@ -1296,10 +1331,7 @@ def key_up(key):
                     fl = _KEYEVENTF_SCANCODE | _KEYEVENTF_KEYUP
                     if _is_extended_key(vk):
                         fl |= _KEYEVENTF_EXTENDEDKEY
-                    _USER32.keybd_event(ctypes.c_byte(0),
-                                        ctypes.c_byte(sc & 0xFF),
-                                        ctypes.c_uint(fl),
-                                        ctypes.c_void_p(0))
+                    _USER32.keybd_event(0, sc & 0xFF, fl, None)
                 passed_0a = _gas_verify_down_up(vki, expect_down=False)
                 if passed_0a and is_arrow:
                     _set_backend("keybd_sc", True)
@@ -2486,16 +2518,14 @@ class KeyBoardController():
                                     try:
                                         sc = _vk_to_sc(VK_LEFT); fl = _KEYEVENTF_SCANCODE
                                         if _is_extended_key(VK_LEFT): fl |= _KEYEVENTF_EXTENDEDKEY
-                                        _USER32.keybd_event(ctypes.c_byte(0), ctypes.c_byte(sc & 0xFF),
-                                                            ctypes.c_uint(fl), ctypes.c_void_p(0))
+                                        _USER32.keybd_event(0, sc & 0xFF, fl, None)
                                         return True
                                     except Exception: return False
                                 def b3_up():
                                     try:
                                         sc = _vk_to_sc(VK_LEFT); fl = _KEYEVENTF_SCANCODE | _KEYEVENTF_KEYUP
                                         if _is_extended_key(VK_LEFT): fl |= _KEYEVENTF_EXTENDEDKEY
-                                        _USER32.keybd_event(ctypes.c_byte(0), ctypes.c_byte(sc & 0xFF),
-                                                            ctypes.c_uint(fl), ctypes.c_void_p(0))
+                                        _USER32.keybd_event(0, sc & 0xFF, fl, None)
                                         return True
                                     except Exception: return False
                                 results.append(_gas_inject(b3_down, b3_up) or _gas_inject(b3_down, b3_up))
