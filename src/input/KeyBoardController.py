@@ -2377,6 +2377,15 @@ class KeyBoardController():
             elif self.cmd_action == "attack":
                 do_action_key("attack", self.attack_key)
                 self.t_last_skill = time.time()
+                # Reset to "none" (like add_hp/add_mp below).  Previously the
+                # attack command LATCHED: the FSM sets cmd_action="attack" once
+                # (e.g. every 2.5 s in patrol) but neither side cleared it, so
+                # this controller loop kept firing the attack key EVERY frame
+                # (~2 Hz), completely bypassing patrol_attack_interval and
+                # freezing the character in an attack-lock so it never walked.
+                # Clearing it here means one FSM "attack" request == exactly one
+                # key press; movement resumes between requests.
+                self.cmd_action = "none"
             elif self.cmd_action == "add_hp":
                 do_action_key("add_hp", self.cfg["key"]["add_hp"])
                 self.cmd_action = "none"  # Reset command

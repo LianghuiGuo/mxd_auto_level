@@ -36,6 +36,16 @@ class PatrolState(State):
         except Exception:
             pass
 
+        # Clear any stale action from the previous frame FIRST (before mob
+        # detection / periodic-attack decide this frame's action).  Otherwise
+        # cmd_action latches to "attack" forever and the KeyBoardController
+        # loop fires the attack key every frame — bypassing
+        # patrol_attack_interval and attack-locking the character in place so
+        # it never walks.  Mob detection or the interval check below will
+        # re-raise "attack" this frame when appropriate.
+        if self.bot.cmd_action == "attack":
+            self.bot.cmd_action = "none"
+
         x, y = self.bot.loc_player
         h, w = self.bot.img_frame.shape[:2]
         loc_player_ratio = float(x)/float(w)
