@@ -161,7 +161,8 @@ monster_detect:
   contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
   with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
   hp_bar_color: [71, 204, 64]  # 💚 Enemy HP bar color (in BGR format)
-  max_mob_area_trigger: 1500   # 📏 How much does the mob need to overlap with attack range to be considered as a target
+  max_mob_area_trigger: 1500   # 📏 Absolute cap (in px) on required overlap between a mob and the attack box before it counts as a target.
+  mob_overlap_ratio_trigger: 0.25 # 📐 Fraction [0.0~1.0] of a mob's OWN area that must overlap the attack box to trigger an attack. Lower = attack when only partially in range (better for patrol / moving player). 0.25 = a quarter of the mob inside the attack box is enough.
   max_matches_per_template: 60 # 🧮 Hard cap on raw template-match points kept per template (before NMS). Guards against a mismatched template producing thousands of false positives that freeze the viz.
   max_monsters: 40             # 🧮 Hard cap on final monster boxes after NMS (protects the debug viz + attack logic from explosions).
 

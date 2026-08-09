@@ -1673,8 +1673,22 @@ class MapleStoryAutoBot:
             ih = max(0, iy2 - iy1)
             inter_area = iw * ih
 
-            min_mob_area = min(img.shape[0]*img.shape[1] for _, imgs in self.monsters_info.items() for img, _ in imgs)
-            inter_area_thres = min(min_mob_area, self.cfg['monster_detect']['max_mob_area_trigger'])
+            # A monster counts as "in attack range" when a meaningful part of
+            # it overlaps the attack box.  Requiring the WHOLE monster (>= a
+            # full sprite area) inside the box was far too strict for patrol /
+            # moving-player scenarios: mobs sat inside the search box but on the
+            # edge of the (smaller) attack box, so their overlap never reached a
+            # full sprite area → nearest=None → character never swung even
+            # though 2-12 mobs were "in range".  Instead trigger when the mob's
+            # OWN overlap ratio passes a threshold (default 25%), capped by the
+            # legacy absolute max_mob_area_trigger so a single giant sprite
+            # can't demand an impossibly large overlap.
+            this_mob_area = max(1, mw * mh)
+            overlap_ratio = float(self.cfg['monster_detect'].get(
+                'mob_overlap_ratio_trigger', 0.25))
+            inter_area_thres = min(
+                this_mob_area * overlap_ratio,
+                self.cfg['monster_detect']['max_mob_area_trigger'])
             if inter_area >= inter_area_thres:
                 # Compute distance to player center
                 monster_center = (mx1 + mw // 2, my1 + mh // 2)
