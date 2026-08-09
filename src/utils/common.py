@@ -565,12 +565,17 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
         upper_bgr = tuple(min(255, c + tol) for c in ref_bgr)
         mask = cv2.inRange(img_minimap, lower_bgr, upper_bgr)
         n = int(cv2.countNonZero(mask))
-        coords = cv2.findNonZero(mask)
         last_mask = mask
         last_n = n
-        if coords is not None and len(coords) >= 4:
-            avg = coords.mean(axis=0)[0]
-            return (int(round(avg[0])), int(round(avg[1])))
+        if n >= 4:
+            # Compute the centroid directly from the mask.  Using
+            # cv2.findNonZero(...).mean(axis=0)[0] was fragile: depending on
+            # the OpenCV build / mask shape the reduction could collapse to a
+            # scalar, and the subsequent avg[0] then raised
+            # "IndexError: invalid index to scalar variable".  np.where is
+            # unambiguous and returns row (y) / col (x) index arrays.
+            ys, xs = np.where(mask > 0)
+            return (int(round(float(xs.mean()))), int(round(float(ys.mean()))))
 
     # --- Diagnostic path: all tolerances failed. ---------------------------
     # Dump the last (widest-tolerance) mask so the user can visualise what
