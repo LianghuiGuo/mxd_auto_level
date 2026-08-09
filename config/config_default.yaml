@@ -152,11 +152,13 @@ monster_detect:
   #   - "template_free" (lightest and fastest, but likely to have many wrong detection)
   # 💡 Feel free to test different modes to find what works best for your setup.
   mode: "contour_only"         # 🧠 Options: "color" "grayscale" "contour_only" "template_free"
-  diff_thres: 0.3              # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match.
-                               #    ⚠️ TM_SQDIFF_NORMED: real monsters score ≈0, while plain/gradient/noise
-                               #    backgrounds never drop below ~0.39. Anything above ~0.35 lets the
-                               #    whole screen match (this caused the 400+ false-positive box explosion).
-                               #    Keep this ≤0.35 for "color"/"grayscale" modes.
+  diff_thres: 0.15             # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match.
+                               #    ⚠️ TM_SQDIFF_NORMED: real monsters score ≈0.  Measured on this client:
+                               #    at 0.30 the mushroom template alone produced ~19k background false
+                               #    matches (the "wall-seam" green boxes); at 0.25 → ~750; at 0.20 → ~165;
+                               #    at 0.15 → ~4; at 0.10 → 0.  Real mobs sit far below 0.15, so 0.15 keeps
+                               #    them while killing almost all background matches.  Do NOT raise above
+                               #    ~0.2 for "color"/"grayscale" modes or the false-positive boxes return.
   search_box_margin: 50        # ➕ Additional margin(in pixels) around the attack box for monster searching
   contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
   with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
