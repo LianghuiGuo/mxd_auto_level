@@ -106,6 +106,18 @@ class RouteRecorder():
         self.loc_minimap_global, score, _ = find_pattern_sqdiff(
                                         self.img_map,
                                         self.img_minimap)
+        # Diagnostic: if the minimap→map match is poor OR the player yellow dot
+        # was not found this frame, loc_player_global freezes and the route
+        # debug stops advancing (the "录了一小段就不记录了" symptom).  Throttle
+        # the log so it doesn't spam.
+        _now = time.time()
+        if _now - getattr(self, "_t_last_glob_dbg", 0.0) > 1.0:
+            self._t_last_glob_dbg = _now
+            logger.info(
+                f"[RouteRecorder] global-match score={round(float(score),3)} "
+                f"loc_minimap_global={self.loc_minimap_global} "
+                f"loc_player_minimap={self.loc_player_minimap}"
+            )
         loc_player_global = (
             self.loc_minimap_global[0] + self.loc_player_minimap[0],
             self.loc_minimap_global[1] + self.loc_player_minimap[1]
@@ -372,6 +384,18 @@ class RouteRecorder():
         loc_player_minimap = get_player_location_on_minimap(self.img_minimap)
         if loc_player_minimap:
             self.loc_player_minimap = loc_player_minimap
+        else:
+            # Yellow player dot not found this frame -> loc_player_minimap keeps
+            # its stale value, freezing the global position and stalling route
+            # recording.  Warn (throttled) so it's visible in the console.
+            _now_pd = time.time()
+            if _now_pd - getattr(self, "_t_last_dot_warn", 0.0) > 1.0:
+                self._t_last_dot_warn = _now_pd
+                logger.warning(
+                    "[RouteRecorder] player yellow dot NOT found on minimap "
+                    "this frame (loc_player_minimap frozen). If this repeats, "
+                    "minimap.player_color needs calibration for your client."
+                )
 
         # Update map
         if self.is_first_frame:
@@ -451,6 +475,11 @@ class RouteRecorder():
                 action = "left none jump"
             elif "right" in key_press:
                 action = "right none jump"
+            elif "up" in key_press:
+                # jump + up = climb a rope ("跳一下再按上").  Previously the
+                # jump branch ignored up, so this recorded as a plain vertical
+                # "none none jump" and playback could never climb.
+                action = "none up jump"
             elif "down" in key_press:
                 action = "none down jump"
             else:

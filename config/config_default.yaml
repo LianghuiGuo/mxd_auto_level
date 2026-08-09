@@ -201,6 +201,7 @@ route:
     "0,255,255": "right none jump"      # 🟦 Cyan
     "127,255,0": "none down jump"       # 💚 Lime
     "255,0,255": "none none jump"       # 💜 Magenta
+    "0,127,255": "none up jump"         # 🟠 Orange-cyan（跳+上，用于爬绳: 先跳再按上）
     "0,255,127": "stop stop stop"       # 🟢 Light green
     "255,255,0": "none none goal"       # 🟨 Yellow
     "255,0,127": "none up teleport"     # 🌸 Pink
