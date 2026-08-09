@@ -400,9 +400,16 @@ def to_standard_hsv(color_hsv):
     v_std = v / 255 * 100
     return (h_std, s_std, v_std)
 
-def get_minimap_loc_size(img_frame):
+def get_minimap_loc_size(img_frame, manual_roi=None):
     '''
     Detects the location and size of the minimap within the game frame.
+
+    manual_roi : [x, y, w, h] | None
+        If provided (e.g. from config ``minimap.manual_roi``), skip ALL
+        automatic border detection and return exactly this rectangle.  The
+        minimap sits at a fixed spot in this client, so hand-measuring it once
+        is the most reliable option — no black frame, no extra strip below.
+        The rectangle is clamped to the frame bounds.
 
     The function works by:
     - Thresholding the image get pure white(255,255,255) pixels.
@@ -414,6 +421,19 @@ def get_minimap_loc_size(img_frame):
         (x, y, w, h): Top-left coordinate and width/height of the minimap.
                     Returns None if not found.
     '''
+    # --- Manual override: fixed hand-measured rectangle --------------------
+    if manual_roi is not None:
+        try:
+            H_frame, W_frame = img_frame.shape[:2]
+            mx, my, mw, mh = (int(v) for v in manual_roi)
+            mx = max(0, min(mx, W_frame - 1))
+            my = max(0, min(my, H_frame - 1))
+            mw = max(1, min(mw, W_frame - mx))
+            mh = max(1, min(mh, H_frame - my))
+            return mx, my, mw, mh
+        except Exception:
+            pass  # bad config -> fall through to auto-detection
+
     # Try strict pure-white first, then fall back to a "near-white" border
     # threshold.  Some clients (e.g. 冒险岛怀旧服) frame the minimap with a
     # multi-layer beige/near-white border whose outermost line is NOT exactly
@@ -508,11 +528,30 @@ def get_minimap_loc_size(img_frame):
         # we crop off BOTH the title strip above and the extra light strip/
         # border below (the "下方多出来一块" the user saw).
         row_mean = inner.reshape(rh, -1, 3).mean(axis=(1, 2))
-        dark_rows = np.where(row_mean < 120)[0]
-        if dark_rows.size > 0:
-            map_y0 = int(dark_rows[0])
-            map_y1 = int(dark_rows[-1])
-        else:
+        # IMPORTANT: use the LONGEST CONTIGUOUS dark run, not first/last dark
+        # row.  The beige title strip contains isolated dark rows (the "小地图"
+        # map-name text) and the light bottom border also has stray dark rows;
+        # taking dark_rows[0]/[-1] then swallowed the title strip above and the
+        # light strip below (the exact "黑框 + 下方多出来一块" the user saw).
+        # The real map content is one solid dark band, so pick that run.
+        def _longest_dark_run(vals, thres=120):
+            best_s = best_e = -1
+            best_len = 0
+            s = None
+            for i, v in enumerate(vals):
+                if v < thres:
+                    if s is None:
+                        s = i
+                else:
+                    if s is not None and (i - s) > best_len:
+                        best_len, best_s, best_e = i - s, s, i - 1
+                    s = None
+            if s is not None and (len(vals) - s) > best_len:
+                best_s, best_e = s, len(vals) - 1
+            return best_s, best_e
+
+        map_y0, map_y1 = _longest_dark_run(row_mean)
+        if map_y0 < 0:
             map_y0 = int(rh * 0.42)  # fallback: skip ~top 42% (title strip)
             map_y1 = rh - 2
 
@@ -521,11 +560,8 @@ def get_minimap_loc_size(img_frame):
         band = inner[map_y0:map_y1 + 1]
         col_mean = band.reshape(band.shape[0], -1, 3).mean(axis=(0, 2)) \
             if band.size else np.array([])
-        dark_cols = np.where(col_mean < 120)[0] if col_mean.size else np.array([])
-        if dark_cols.size > 0:
-            map_x0 = int(dark_cols[0])
-            map_x1 = int(dark_cols[-1])
-        else:
+        map_x0, map_x1 = _longest_dark_run(col_mean) if col_mean.size else (-1, -1)
+        if map_x0 < 0:
             map_x0 = 1
             map_x1 = rw - 2
 

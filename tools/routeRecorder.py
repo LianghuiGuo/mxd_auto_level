@@ -312,7 +312,8 @@ class RouteRecorder():
 
         # Get minimap from game window
         if self.is_first_frame:
-            mm = get_minimap_loc_size(self.img_frame)
+            _manual_roi = (self.cfg.get("minimap") or {}).get("manual_roi")
+            mm = get_minimap_loc_size(self.img_frame, manual_roi=_manual_roi)
             if mm is None:
                 # Don't crash: the minimap white-frame detector found nothing
                 # (minimap collapsed, or its border isn't pure white(255,255,255)
@@ -337,11 +338,14 @@ class RouteRecorder():
                 self.t_last_frame = time.time()
                 return -1
             x, y, w, h = mm
-            # Discard 1 pixel boundary of the minimap
-            x += 1
-            y += 1
-            w -= 2
-            h -= 2
+            if _manual_roi is None:
+                # Discard 1 pixel boundary of the AUTO-detected white frame.
+                # For a hand-measured manual_roi the user already supplies the
+                # exact content rectangle, so don't shave it further.
+                x += 1
+                y += 1
+                w -= 2
+                h -= 2
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
         else:

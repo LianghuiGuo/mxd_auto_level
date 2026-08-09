@@ -296,6 +296,12 @@ minimap:
   player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
   other_player_color: [0, 0, 255] # 🔴 BGR value of the red other player dot on the minimap
   debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
+  # ✂️ 手动指定小地图区域 [x, y, w, h]（像素，基于 resize 后的游戏帧）
+  # 当自动检测的小地图边框对不齐（残留黑框 / 下方多出一块）时，直接量一次
+  # 小地图"地图内容区"（不含标题栏、不含外边框）的左上角坐标和宽高，填在这里。
+  # 填了它就跳过所有自动检测，一劳永逸。默认 null = 走自动检测。
+  # 例：manual_roi: [4, 96, 152, 60]
+  manual_roi: null
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
 
 patrol:
