@@ -468,6 +468,9 @@ class MapleStoryAutoBot:
         self._nt_fp_disabled        = False
         self._nt_first_frame_t      = None
         self._nt_dbg_fp_saved       = False
+        # Sticky last-good nametag location (anti-flicker, see cascade).
+        self._nt_last_good_loc      = None
+        self._nt_last_good_t        = 0.0
         # Emergency motion fallback.  When both the route tracker AND the
         # random-stuck-rescue fail to produce a non-none move command for a
         # continuous window, we drop into a very simple left/right patrol
@@ -633,7 +636,23 @@ class MapleStoryAutoBot:
                 nt_player = None
         if nt_player is not None:
             method_used = "nametag" if self.cfg["nametag"]["enable"] else "nametag_auto_fallback"
+            # Remember this good result so a single dropped frame does not snap
+            # loc_player back to camera-center (see sticky fallback below).
+            self._nt_last_good_loc = nt_player
+            self._nt_last_good_t = time.time()
             return nt_player, prb_bar, method_used
+
+        # --- Stage 2.5: sticky last-good nametag ----------------------------
+        # nametag matching flickers frame-to-frame (半透明底色 + 变化背景使
+        # 分数在 diff_thres 附近抖动).  Without this, loc_player oscillates
+        # between the real spot and the (648,406) camera-center every other
+        # frame, so patrol keeps flipping direction and the character walks a
+        # step then stalls.  If we had a good nametag hit very recently, reuse
+        # it for a short grace window instead of collapsing to camera-center.
+        _last_good_t = getattr(self, "_nt_last_good_t", 0.0)
+        _last_good_loc = getattr(self, "_nt_last_good_loc", None)
+        if _last_good_loc is not None and (time.time() - _last_good_t) <= 1.5:
+            return _last_good_loc, prb_bar, "nametag_sticky"
 
         # --- Stage 3: camera-center fallback --------------------------------
         # Primary gate: is the frame capture actually yielding real pixels?
@@ -3237,7 +3256,7 @@ class MapleStoryAutoBot:
                     "reduced.  Fix: make a nametag template for your "
                     "character's name (see usage notes)."
                 )
-            elif method_used in ("nametag", "nametag_auto_fallback"):
+            elif method_used in ("nametag", "nametag_auto_fallback", "nametag_sticky"):
                 logger.info(
                     f"[Player Location] Using nametag detection "
                     f"({method_used})."
