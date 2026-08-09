@@ -1,0 +1,3 @@
+# Trained YOLO monster-detection weights (mob_yolo.pt) are copied here by
+# ml/train.py. The engine loads models/mob_yolo.pt when monster_detect.mode
+# is "yolo".

@@ -1,0 +1,38 @@
+path: dataset
+train: images/train
+val: images/val
+auto_scan: true
+names:
+  0: black_axe_stump
+  1: blue_perfume
+  2: blue_snail
+  3: brown_windup_bear
+  4: cold_eye
+  5: dark_nependeath
+  6: evolved_ghost
+  7: fire_boar
+  8: green_mushroom
+  9: grizzly
+  10: grupin
+  11: hodori
+  12: moon_bunny
+  13: mushroom
+  14: nependeath
+  15: panda
+  16: pig
+  17: pink_windup_bear
+  18: red_cellion
+  19: red_snail
+  20: ribbon_pig
+  21: shroom
+  22: skeleton_officer
+  23: skeleton_soldier
+  24: slime
+  25: spike_mushroom
+  26: stump
+  27: the_book_ghost
+  28: wild_boar
+  29: wild_kargo
+  30: wind_single_eye_beast
+  31: zombie_lupin
+  32: zombie_mushroom

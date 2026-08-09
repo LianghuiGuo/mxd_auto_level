@@ -151,7 +151,13 @@ monster_detect:
   #   - "contour_only"  (fast, contour-based, a good balance)
   #   - "template_free" (lightest and fastest, but likely to have many wrong detection)
   # 💡 Feel free to test different modes to find what works best for your setup.
-  mode: "contour_only"         # 🧠 Options: "color" "grayscale" "contour_only" "template_free"
+  mode: "contour_only"         # 🧠 Options: "color" "grayscale" "contour_only" "template_free" "yolo"
+                               #    "yolo" uses a trained neural net (models/mob_yolo.pt) instead of
+                               #    template matching — far fewer background false positives, but you
+                               #    must train it first (see ml/train.py).  Falls back to template
+                               #    matching automatically if the model/ultralytics is unavailable.
+  yolo_model_path: "models/mob_yolo.pt"  # 🤖 Path to the trained YOLO weights (used when mode=="yolo").
+  yolo_conf_thres: 0.4         # 🎯 YOLO confidence threshold [0..1]; higher = stricter (fewer boxes).
   diff_thres: 0.15             # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match.
                                #    ⚠️ TM_SQDIFF_NORMED: real monsters score ≈0.  Measured on this client:
                                #    at 0.30 the mushroom template alone produced ~19k background false

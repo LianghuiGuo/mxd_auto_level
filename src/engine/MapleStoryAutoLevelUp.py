@@ -1734,6 +1734,90 @@ class MapleStoryAutoBot:
         best_idx = np.argpartition(scores, cap - 1)[:cap]
         return list(zip(xs[best_idx], ys[best_idx]))
 
+    def _detect_monsters_yolo(self, img_roi, x0, y0):
+        '''
+        Run YOLO inference on the ROI and return detections in the engine's
+        standard monster-dict format, or None if the model can't be used (so
+        the caller can fall back to template matching).
+
+        Each returned dict matches what template matching produces:
+            {"name": <class name>, "position": (x, y) top-left in FULL-frame
+             coords, "size": (h, w), "score": <confidence 0..1>}
+
+        The model is loaded lazily on first use and cached on the instance.
+        A failed load is remembered so we don't retry every frame.
+        '''
+        if getattr(self, "_yolo_load_failed", False):
+            return None
+
+        model = getattr(self, "_yolo_model", None)
+        if model is None:
+            try:
+                from ultralytics import YOLO
+            except ImportError:
+                logger.error("[YOLO] ultralytics not installed. "
+                             "Run: pip install ultralytics. "
+                             "Falling back to template matching.")
+                self._yolo_load_failed = True
+                return None
+            model_path = self.cfg["monster_detect"].get(
+                "yolo_model_path", "models/mob_yolo.pt")
+            if not os.path.exists(model_path):
+                logger.error(f"[YOLO] model file not found: {model_path}. "
+                             "Train it (ml/train.py) or set "
+                             "monster_detect.yolo_model_path. Falling back to "
+                             "template matching.")
+                self._yolo_load_failed = True
+                return None
+            try:
+                model = YOLO(model_path)
+                self._yolo_model = model
+                logger.info(f"[YOLO] loaded model {model_path} "
+                            f"classes={model.names}")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[YOLO] failed to load model: {e}. "
+                             "Falling back to template matching.")
+                self._yolo_load_failed = True
+                return None
+
+        if img_roi is None or img_roi.size == 0:
+            return []
+
+        conf = float(self.cfg["monster_detect"].get("yolo_conf_thres", 0.4))
+        try:
+            results = model.predict(img_roi, conf=conf, verbose=False)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[YOLO] inference error: {e}. Falling back.")
+            self._yolo_load_failed = True
+            return None
+
+        monsters = []
+        names = model.names
+        for r in results:
+            boxes = getattr(r, "boxes", None)
+            if boxes is None:
+                continue
+            for b in boxes:
+                xyxy = b.xyxy[0].tolist()
+                bx1, by1, bx2, by2 = xyxy
+                score = float(b.conf[0]) if b.conf is not None else 1.0
+                cls_idx = int(b.cls[0]) if b.cls is not None else -1
+                cls_name = names.get(cls_idx, str(cls_idx)) \
+                    if isinstance(names, dict) else str(cls_idx)
+                bw = int(round(bx2 - bx1))
+                bh = int(round(by2 - by1))
+                monsters.append({
+                    "name": cls_name,
+                    # convert ROI-local → full-frame coords
+                    "position": (int(round(bx1)) + x0, int(round(by1)) + y0),
+                    "size": (bh, bw),  # (h, w) to match the rest of the engine
+                    # engine sorts ascending (TM_SQDIFF: lower=better).  YOLO
+                    # confidence is higher=better, so store (1 - conf) so the
+                    # existing NMS / max_monsters sort keeps the STRONGEST.
+                    "score": 1.0 - score,
+                })
+        return monsters
+
     def get_monsters_in_range(self, top_left, bottom_right):
         '''
         get_monsters_in_range
@@ -1755,9 +1839,34 @@ class MapleStoryAutoBot:
         char_y_max = min(img_roi.shape[0], py_in_roi + self.cfg["character"]["height"] // 2)
 
         monsters = []
-        for monster_name, monster_imgs in self.monsters_info.items():
+        # ------------------------------------------------------------------
+        # YOLO detection path.  When monster_detect.mode == "yolo" we bypass
+        # the per-template cv2.matchTemplate loop entirely and run a single
+        # neural-net inference over the ROI, converting each detection into the
+        # SAME dict shape {name, position, size, score} that the rest of the
+        # engine (NMS, attack logic, viz) already consumes.  Falls back to
+        # template matching automatically if the model can't be loaded.
+        # ------------------------------------------------------------------
+        if self.cfg["monster_detect"]["mode"] == "yolo":
+            yolo_monsters = self._detect_monsters_yolo(img_roi, x0, y0)
+            if yolo_monsters is not None:
+                monsters = yolo_monsters
+                # skip the template loop below
+                monster_iter = []
+            else:
+                # model unavailable → degrade gracefully to color matching
+                monster_iter = self.monsters_info.items()
+        else:
+            monster_iter = self.monsters_info.items()
+
+        for monster_name, monster_imgs in monster_iter:
             for img_monster, mask_monster in monster_imgs:
-                if self.cfg["monster_detect"]["mode"] == "template_free":
+                _effective_mode = self.cfg["monster_detect"]["mode"]
+                if _effective_mode == "yolo":
+                    # yolo already handled above; if we got here it means the
+                    # model failed to load, so treat as color matching.
+                    _effective_mode = "color"
+                if _effective_mode == "template_free":
                     # Generate mask where pixel is exactly (0,0,0)
                     black_mask = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
                     # cv2.imshow("Black Pixel Mask", black_mask)
@@ -1789,7 +1898,7 @@ class MapleStoryAutoBot:
                                 "size": (h, w),
                                 "score": 1.0,
                             })
-                elif self.cfg["monster_detect"]["mode"] == "contour_only":
+                elif _effective_mode == "contour_only":
                     # Use only black lines contour to detect monsters
                     # Create masks (already grayscale)
                     mask_pattern = np.all(img_monster == [0, 0, 0], axis=2).astype(np.uint8) * 255
@@ -1824,7 +1933,7 @@ class MapleStoryAutoBot:
                             "size": (h, w),
                             "score": res[pt[1], pt[0]],
                         })
-                elif self.cfg["monster_detect"]["mode"] == "grayscale":
+                elif _effective_mode == "grayscale":
                     img_monster_gray = cv2.cvtColor(img_monster, cv2.COLOR_BGR2GRAY)
                     img_roi_gray = cv2.cvtColor(img_roi, cv2.COLOR_BGR2GRAY)
                     res = cv2.matchTemplate(
@@ -1841,7 +1950,7 @@ class MapleStoryAutoBot:
                             "size": (h, w),
                             "score": res[pt[1], pt[0]],
                     })
-                elif self.cfg["monster_detect"]["mode"] == "color":
+                elif _effective_mode == "color":
                     res = cv2.matchTemplate(
                             img_roi,
                             img_monster,
@@ -1857,7 +1966,7 @@ class MapleStoryAutoBot:
                             "score": res[pt[1], pt[0]],
                     })
                 else:
-                    logger.error(f"Unexpected camera localization mode: {self.cfg['monster_detect']['mode']}")
+                    logger.error(f"Unexpected camera localization mode: {_effective_mode}")
                     return []
 
         # Apply Non-Maximum Suppression to monster detection

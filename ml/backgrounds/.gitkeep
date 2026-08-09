@@ -1,0 +1,2 @@
+# Put clean game-background screenshots here (few or no monsters).
+# ml/synth.py pastes monster sprites onto these to build the training set.
