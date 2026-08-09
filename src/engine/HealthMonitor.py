@@ -113,15 +113,61 @@ class HealthMonitor:
 
         contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        # The HP/MP/EXP bars are long, thin white rectangles clustered at the
+        # very BOTTOM of the client.  The old filter used an ABSOLUTE area
+        # window (2500 < w*h < 5000) hand-tuned for a single 752x1282 layout,
+        # so on any other client resolution (e.g. 1366x768 → captured as
+        # 1296x759) the three real bars fell outside that window, the filter
+        # returned <3 bars, and auto-heal/auto-mp silently never fired.
+        #
+        # Fix: keep the SHAPE test (long & thin) but make the SIZE test
+        # RESOLUTION-RELATIVE, and require the bar to sit in the bottom band of
+        # the frame (where the HP/MP/EXP gauges always live).  This adapts to
+        # any client size without per-resolution magic numbers.
+        H_full, W_full = img_frame_gray.shape[:2]
+        y_bottom_band = int(H_full * 0.80)   # bars live below ~80% height
+        min_w = int(W_full * 0.03)           # each bar spans a few % of width
+        max_w = int(W_full * 0.35)
+        min_h = 3
+        max_h = int(H_full * 0.06)
+
         loc_size_bars = []
+        cand_dbg = []
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
-            # for game window resolution 752x1282, w/h == 7.5, w*h == 3630
-            if 4 < w/h < 10 and 2500 < w*h < 5000:
+            if h <= 0:
+                continue
+            ar = w / float(h)
+            # long-and-thin AND bottom-band AND width/height in relative range
+            if (3.0 < ar < 20.0 and
+                    y >= y_bottom_band and
+                    min_w <= w <= max_w and
+                    min_h <= h <= max_h):
                 loc_size_bars.append((x, y, w, h))
+                cand_dbg.append((x, y, w, h, round(ar, 1)))
 
         # sort contours by x coordinate
         loc_size_bars = sorted(loc_size_bars, key=lambda bar: bar[0])
+
+        # One-shot diagnostic so the user can see WHY bars were / weren't
+        # found (prints the candidate rectangles the shape filter accepted).
+        try:
+            cls = type(self)
+            if not getattr(cls, "_bar_dbg_done", False) or \
+                    len(loc_size_bars) != 3:
+                now = time.time()
+                if now - getattr(cls, "_bar_dbg_t", 0.0) >= 3.0:
+                    cls._bar_dbg_t = now
+                    cls._bar_dbg_done = True
+                    logger.info(
+                        f"[Health Monitor] bar-detect: frame_wh="
+                        f"{(W_full, H_full)} bottom_band_y>={y_bottom_band} "
+                        f"w:[{min_w},{max_w}] h:[{min_h},{max_h}] "
+                        f"found={len(loc_size_bars)} candidates={cand_dbg}"
+                    )
+        except Exception:
+            pass
+
         if len(loc_size_bars) != 3:
             return (None, None, None)
 
