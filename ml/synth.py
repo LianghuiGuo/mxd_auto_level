@@ -74,36 +74,71 @@ def _greenish_mask(bgr):
     b = bgr[:, :, 0].astype(np.int16)
     g = bgr[:, :, 1].astype(np.int16)
     r = bgr[:, :, 2].astype(np.int16)
-    # ONLY the pure green-screen key, not the mob's own (yellowish) green body.
-    # Screen key is ~(0,255,0): both R and B are near-zero.  Slime's body green
-    # is ~(9,158,107) — its high red (~107) keeps it OUT of this mask.  Keep the
-    # red/blue ceilings tight so anti-aliased fringe is removed but body colors
-    # survive.
-    return (g > 120) & (r < 70) & (b < 70) & (g - r > 90) & (g - b > 90)
+    # "greenish enough to possibly be the screen key".  Deliberately LOOSE — it
+    # matches the mob's own green body too.  We disambiguate body-vs-background
+    # by connectivity in _background_mask (only green connected to the border is
+    # background), so a loose color test here is fine and catches anti-aliasing.
+    return (g > 110) & (r < 130) & (b < 130) & (g - r > 40) & (g - b > 40)
+
+
+def _background_mask(bgr):
+    """Boolean mask of TRUE background (green screen) pixels.
+
+    Color alone can't separate the mob's body green from the screen key — a
+    slime's body is literally (34,255,153), G fully saturated, same as the
+    screen.  What DOES separate them is connectivity: the green screen is one
+    region touching the image border, while the mob's internal green is walled
+    off by the mob's own darker outline.  So: take all "greenish" pixels, then
+    flood-fill from the border and keep only the greenish component connected to
+    the edge.  Internal green (the mob body) is preserved.
+    """
+    greenish = _greenish_mask(bgr).astype(np.uint8)
+    h, w = greenish.shape
+    # Label connected greenish regions, then keep only labels that touch the
+    # image border (that's the screen); drop labels fully inside (mob body).
+    n, labels = cv2.connectedComponents(greenish, connectivity=8)
+    border = np.concatenate([
+        labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]
+    ])
+    border_labels = set(int(v) for v in np.unique(border) if v != 0)
+    if not border_labels:
+        return np.zeros((h, w), bool)
+    bg = np.isin(labels, list(border_labels))
+    return bg
 
 
 def sprite_mask(img):
     """Return (bgr, keep_mask_uint8) from a loaded sprite image.
 
-    The kept region is the sprite itself; the (green-screen) background is
-    removed.  Robust to both cut-out styles:
-      * transparent PNG  -> start from the alpha channel (hand-cut player).
-      * green-screen PNG  -> start from "everything".
-    In BOTH cases we ALSO subtract green-screen pixels, because mob_maker mob
-    PNGs ship WITH a fully-opaque alpha channel over a green background — so the
-    alpha alone keeps the green box.  Removing greenish pixels here is what
-    actually cuts the mob out.
+    The kept region is the sprite itself; the background is removed.  Two
+    mutually-exclusive cut-out styles are supported, chosen automatically:
+
+      * REAL transparent PNG (hand-cut player, or a hand-cut mob whose body
+        color clashes with a green key — e.g. slime, which is itself pure
+        green): the alpha channel already defines the cut-out, so we trust ONLY
+        alpha and do NOT run green-screen removal (that would eat the green
+        body).  Detected by "has some fully-transparent pixels".
+
+      * Green-screen PNG straight from mob_maker (fully-opaque alpha over a
+        (0,255,0) background): alpha is useless, so we cut by removing the green
+        screen.  We use connectivity (green connected to the image border) so a
+        mob's internal green survives where possible.
     """
     if img is None:
         return None
     bgr = img[:, :, :3]
-    if img.ndim == 3 and img.shape[2] == 4:
-        alpha = img[:, :, 3]
-        keep = (alpha > 10)
-    else:
-        keep = np.ones(bgr.shape[:2], dtype=bool)
-    # Always drop green-screen background (incl. anti-aliased fringe).
-    keep = keep & (~_greenish_mask(bgr))
+    has_real_alpha = (
+        img.ndim == 3 and img.shape[2] == 4 and bool((img[:, :, 3] < 10).any())
+    )
+    if has_real_alpha:
+        # Trust the hand-made alpha only; never green-key a transparent sprite.
+        keep = (img[:, :, 3] > 10)
+        keep = (keep.astype(np.uint8)) * 255
+        keep = cv2.erode(keep, np.ones((2, 2), np.uint8))
+        return bgr, keep
+    # Opaque green-screen sprite: cut by removing the (border-connected) green.
+    keep = np.ones(bgr.shape[:2], dtype=bool)
+    keep = keep & (~_background_mask(bgr))
     keep = (keep.astype(np.uint8)) * 255
     # tighten: erode 1px to kill any 1px green fringe still clinging to edges
     keep = cv2.erode(keep, np.ones((2, 2), np.uint8))
