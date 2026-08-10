@@ -51,6 +51,18 @@ class HealthMonitor:
                               (0, 0, 0, 0),
                               (0, 0, 0, 0)]
 
+        # --- Locked bar ROIs -------------------------------------------------
+        # The dynamic contour finder is fragile: transient white UI (damage
+        # numbers, popups, buff bars) can sneak into the 3-bar set and get
+        # mistaken for the HP bar, pinning HP at a constant value -> endless
+        # healing on full HP.  To make this robust we LOCK the bar rectangles
+        # once we get a trustworthy detection (exactly 3 long-thin bars AND the
+        # left-most one actually contains red = a real HP bar).  After that we
+        # ALWAYS read those fixed ROIs and never re-run the noisy contour
+        # search, so no transient UI can hijack the HP reading.
+        self._bars_locked = None          # list[(x,y,w,h)] once locked
+        self._lock_fail_streak = 0        # consecutive locked-read failures
+
         logger.info("[Health Monitor] Init done")
 
     def start(self):
@@ -107,6 +119,31 @@ class HealthMonitor:
 
         with self.frame_lock:
             img_frame = self.img_frame.copy()
+
+        # --- Fast path: bars already locked -> read fixed ROIs ---------------
+        # Once locked we TRUST the position and only read the fill ratio.  We do
+        # NOT re-verify "is this red" here on purpose: at very low HP the bar is
+        # almost empty (little/no red), and requiring red would make us stop
+        # reading exactly when healing matters most.  The lock itself was gated
+        # on a real red HP bar (see below), and the bar never moves, so the
+        # position stays valid for the whole session.
+        if self._bars_locked is not None:
+            Hf, Wf = img_frame.shape[:2]
+            percents = []
+            ok = True
+            for (x, y, w, h) in self._bars_locked:
+                if x < 0 or y < 0 or x + w > Wf or y + h > Hf or w <= 0 or h <= 0:
+                    ok = False
+                    break
+                percents.append(get_bar_percent(img_frame[y:y+h, x:x+w]))
+            if ok:
+                return percents
+            # Geometry no longer fits the frame (resolution changed) -> unlock.
+            logger.warning(
+                "[Health Monitor] Locked bar ROI no longer fits the frame "
+                "(resolution changed?); re-detecting bars.")
+            self._bars_locked = None
+            return (None, None, None)
 
         img_frame_gray = cv2.cvtColor(img_frame, cv2.COLOR_BGR2GRAY)
         white_mask = cv2.inRange(img_frame_gray, 240, 255)
@@ -182,18 +219,35 @@ class HealthMonitor:
         hp_x, hp_y, hp_w, hp_h = loc_size_bars[0]
         hp_img = img_frame[hp_y:hp_y + hp_h, hp_x:hp_x + hp_w]
         if not self._looks_like_hp_bar(hp_img):
-            if not getattr(type(self), "_hp_fake_warned", False):
-                type(self)._hp_fake_warned = True
+            # Left-most "bar" isn't a red HP bar -> this detection is untrusted
+            # (transient white UI mistaken for a bar).  Don't lock and don't
+            # heal off it; keep trying on later frames until a clean red HP bar
+            # shows up so we can lock onto the REAL bars.
+            cls = type(self)
+            now = time.time()
+            if now - getattr(cls, "_hp_fake_t", 0.0) >= 3.0:
+                cls._hp_fake_t = now
+                # Report the actual red fraction + a sample colour so the
+                # threshold can be tuned to this client if needed.
+                bb = hp_img[:, :, 0].astype(np.int16)
+                gg = hp_img[:, :, 1].astype(np.int16)
+                rr = hp_img[:, :, 2].astype(np.int16)
+                red = (rr > 90) & (rr - gg > 30) & (rr - bb > 30)
+                mid = hp_img[hp_img.shape[0] // 2] if hp_img.size else []
                 logger.warning(
-                    "[Health Monitor] Left-most detected bar does not look "
-                    "like an HP bar (little/no red fill).  Ignoring this HP "
-                    "read to avoid drinking potions on full HP.  If this "
-                    "repeats, the HP bar ROI / detection needs calibration."
-                )
+                    "[Health Monitor] Candidate HP bar has no red fill "
+                    f"(red_ratio={float(red.mean()) if hp_img.size else 0:.3f}, "
+                    f"roi=({hp_x},{hp_y},{hp_w},{hp_h}), "
+                    f"mid_row_sample_BGR={[list(map(int,p)) for p in mid[:6]]}). "
+                    "Waiting for a clean detection before locking bar ROIs.")
             return (None, None, None)
 
-        # Update loc_size_bars
+        # Trustworthy detection: LOCK these ROIs for the rest of the session so
+        # transient UI can never hijack the reading again.
+        self._bars_locked = list(loc_size_bars)
         self.loc_size_bars = loc_size_bars
+        logger.info(
+            f"[Health Monitor] Locked bar ROIs (HP/MP/EXP): {loc_size_bars}")
 
         # Get bar filled ratio
         percent_bars = []
