@@ -533,19 +533,22 @@ def get_minimap_loc_size(img_frame, manual_roi=None,
         x0, y0, rw, rh, area = stats[i]
         if rw < 100 or rh < 80:
             continue
-        # Reject components that are clearly too big to be the minimap: those
-        # are the border colour bleeding into the surrounding game art.  The
-        # real minimap frame stays comfortably under max_w/max_h.
-        if rw > max_w or rh > max_h:
-            continue
         # Minimap sits in the top-left corner of the frame.
         if x0 > int(img_frame.shape[1] * 0.35) or \
            y0 > int(img_frame.shape[0] * 0.35):
             continue
+        # Hollow-frame test on the ORIGINAL component (a border frame is mostly
+        # empty inside -> low fill ratio).
         fill = area / float(rw * rh)
-        # A hollow border frame is mostly empty inside -> low fill ratio.
         if fill > 0.30:
             continue
+        # An oversized component is the border colour bleeding into the
+        # surrounding game art.  Rather than REJECT it (which can leave us with
+        # no candidate at all on maps where the bleed is unavoidable -> minimap
+        # "not found"), CLAMP its width/height to the sane cap.  The top-left
+        # corner is trusted; only the runaway bottom-right is trimmed back.
+        rw = min(rw, max_w)
+        rh = min(rh, max_h)
         if best is None or (rw * rh) > (best[2] * best[3]):
             best = (x0, y0, rw, rh)
     if best is not None:
