@@ -74,7 +74,12 @@ def _greenish_mask(bgr):
     b = bgr[:, :, 0].astype(np.int16)
     g = bgr[:, :, 1].astype(np.int16)
     r = bgr[:, :, 2].astype(np.int16)
-    return (g > 150) & (r < 120) & (b < 120) & (g - r > 60) & (g - b > 60)
+    # ONLY the pure green-screen key, not the mob's own (yellowish) green body.
+    # Screen key is ~(0,255,0): both R and B are near-zero.  Slime's body green
+    # is ~(9,158,107) — its high red (~107) keeps it OUT of this mask.  Keep the
+    # red/blue ceilings tight so anti-aliased fringe is removed but body colors
+    # survive.
+    return (g > 120) & (r < 70) & (b < 70) & (g - r > 90) & (g - b > 90)
 
 
 def sprite_mask(img):
