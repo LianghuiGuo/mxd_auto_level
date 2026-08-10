@@ -72,7 +72,7 @@ directional_attack:
                              #    trigger test (not the real reach). Fixes monsters_in_range>0 but
                              #    nearest=None (mob beside the player but just outside the tight box, e.g.
                              #    because YOLO loc_player sits at the torso while the mob stands lower).
-  max_y_diff: 60             # ↕️ Max |player_y - monster_center_y| (px) allowed to still attack. A
+  max_y_diff: 35             # ↕️ Max |player_y - monster_center_y| (px) allowed to still attack. A
                              #    directional attack is HORIZONTAL, so a mob far above/below the player
                              #    can be "in the box" yet un-hittable. Lower this to stop swinging when the
                              #    mob is not on the same line; set 0/negative to disable this y-gate.
