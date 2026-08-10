@@ -59,26 +59,48 @@ def scan_monster_classes():
     return out
 
 
+def _greenish_mask(bgr):
+    """Boolean mask of green-screen background pixels.
+
+    We can't rely on an EXACT (0,255,0) match: mob_maker sprites are
+    anti-aliased, so the ring of pixels between the sprite and the pure-green
+    background are partially-green (e.g. (0,240,20) in BGR).  Those transition
+    pixels are only ~40% "pure green" on round sprites like slime, so exact
+    matching left a thick green halo/box around the mob in the synthetic image
+    (which taught the detector that "slime == green box" and wrecked real-game
+    recall).  Treat any pixel with a dominant green channel and low red/blue as
+    background so the whole key — including the anti-aliased fringe — is removed.
+    """
+    b = bgr[:, :, 0].astype(np.int16)
+    g = bgr[:, :, 1].astype(np.int16)
+    r = bgr[:, :, 2].astype(np.int16)
+    return (g > 150) & (r < 120) & (b < 120) & (g - r > 60) & (g - b > 60)
+
+
 def sprite_mask(img):
     """Return (bgr, keep_mask_uint8) from a loaded sprite image.
 
-    Handles BOTH cut-out styles so you can hand-cut the player however is
-    easiest:
-      * transparent PNG  -> use the alpha channel as the mask (recommended for
-        hand-cut player sprites; just erase the background in any editor).
-      * green-screen PNG  -> everything that is NOT the (0,255,0) key is kept
-        (this is what mob_maker produces for monsters).
+    The kept region is the sprite itself; the (green-screen) background is
+    removed.  Robust to both cut-out styles:
+      * transparent PNG  -> start from the alpha channel (hand-cut player).
+      * green-screen PNG  -> start from "everything".
+    In BOTH cases we ALSO subtract green-screen pixels, because mob_maker mob
+    PNGs ship WITH a fully-opaque alpha channel over a green background — so the
+    alpha alone keeps the green box.  Removing greenish pixels here is what
+    actually cuts the mob out.
     """
     if img is None:
         return None
+    bgr = img[:, :, :3]
     if img.ndim == 3 and img.shape[2] == 4:
-        bgr = img[:, :, :3]
         alpha = img[:, :, 3]
-        keep = (alpha > 10).astype(np.uint8) * 255
+        keep = (alpha > 10)
     else:
-        bgr = img[:, :, :3]
-        keep = (~np.all(bgr == GREEN, axis=2)).astype(np.uint8) * 255
-    # tighten: erode 1px to kill fringe pixels around the edge
+        keep = np.ones(bgr.shape[:2], dtype=bool)
+    # Always drop green-screen background (incl. anti-aliased fringe).
+    keep = keep & (~_greenish_mask(bgr))
+    keep = (keep.astype(np.uint8)) * 255
+    # tighten: erode 1px to kill any 1px green fringe still clinging to edges
     keep = cv2.erode(keep, np.ones((2, 2), np.uint8))
     return bgr, keep
 
