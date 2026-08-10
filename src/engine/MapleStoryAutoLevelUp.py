@@ -1623,13 +1623,22 @@ class MapleStoryAutoBot:
 
         return nearest[0], nearest_ud[0]  # if not found return none
 
-    def get_attack_range(self, is_left=True):
+    def get_attack_range(self, is_left=True, relax=0):
         '''
         get_attack_range
+
+        ``relax`` (pixels) enlarges the box used purely for the *trigger*
+        decision (get_nearest_monster) without changing the real attack reach.
+        A YOLO/nametag ``loc_player`` sits at the character's torso, but mobs
+        stand on the ground a bit lower / a step further out, so the tight
+        150x70 directional box frequently EXCLUDED mobs that were clearly next
+        to the player (monsters_in_range>0 but nearest=None -> never attacked).
+        Relaxing the box vertically (and a little horizontally) lets those mobs
+        count as attackable so the character actually swings.
         '''
         if self.cfg["bot"]["attack"] == "aoe_skill":
-            dx = self.cfg["aoe_skill"]["range_x"] // 2
-            dy = self.cfg["aoe_skill"]["range_y"] // 2
+            dx = self.cfg["aoe_skill"]["range_x"] // 2 + relax
+            dy = self.cfg["aoe_skill"]["range_y"] // 2 + relax
             x0 = max(0, self.loc_player[0] - dx)
             x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
             y0 = max(0, self.loc_player[1] - dy)
@@ -1637,13 +1646,13 @@ class MapleStoryAutoBot:
 
         elif self.cfg["bot"]["attack"] == "directional":
             if is_left:
-                x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"]
-                x1 = self.loc_player[0]
+                x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"] - relax
+                x1 = self.loc_player[0] + relax
             else:
-                x0 = self.loc_player[0]
-                x1 = x0 + self.cfg["directional_attack"]["range_x"]
-            y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
-            y1 = y0 + self.cfg["directional_attack"]["range_y"]
+                x0 = self.loc_player[0] - relax
+                x1 = self.loc_player[0] + self.cfg["directional_attack"]["range_x"] + relax
+            y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2 - relax
+            y1 = self.loc_player[1] + self.cfg["directional_attack"]["range_y"] // 2 + relax
         else:
             raise RuntimeError(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
 
@@ -1667,7 +1676,8 @@ class MapleStoryAutoBot:
             dict or None: The nearest monster's info dict, or None if no valid match.
         '''
 
-        x0, y0, x1, y1 = self.get_attack_range(is_left=is_left)
+        relax = int(self.cfg["directional_attack"].get("trigger_relax", 40))
+        x0, y0, x1, y1 = self.get_attack_range(is_left=is_left, relax=relax)
 
         nearest_monster = None
         min_distance = float('inf')

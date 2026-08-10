@@ -63,6 +63,10 @@ directional_attack:
   # For examples, Mage’s Magic Claw, Thief’s dart throw, or even a snail shell toss are all directional attack
   range_x: 350               # ↔️ Horizontal attack range (in pixels)
   range_y: 70                # ↕️ Vertical attack range (in pixels)
+  trigger_relax: 40          # 🎯 Extra px added around the attack box ONLY for the "is a mob attackable"
+                             #    trigger test (not the real reach). Fixes monsters_in_range>0 but
+                             #    nearest=None (mob beside the player but just outside the tight box, e.g.
+                             #    because YOLO loc_player sits at the torso while the mob stands lower).
   cooldown: 0.9              # ⏱️ Time between attacks (in seconds)
   character_turn_delay: 0.02 # 🔄 Delay after turning before attacking (in seconds)
 
