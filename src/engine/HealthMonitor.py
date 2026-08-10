@@ -202,20 +202,29 @@ class HealthMonitor:
         return percent_bars
 
     @staticmethod
-    def _looks_like_hp_bar(bar_img, min_red_ratio=0.10):
+    def _looks_like_hp_bar(bar_img, min_red_ratio=0.02):
         '''
         Heuristic: a real MapleStory HP bar has a RED filled section.  Return
-        True if a meaningful fraction of the bar's pixels are red-dominant
-        (R notably greater than both G and B).  Used to reject non-HP white
-        UI elements that the contour detector sometimes mistakes for the HP
-        bar (which caused constant-value HP reads and endless healing).
+        True if ANY non-trivial amount of the bar is red-dominant (R clearly
+        greater than G and B).
+
+        The goal is ONLY to reject the fully grey/white UI elements the contour
+        finder occasionally mistakes for the HP bar (which pinned HP at a
+        constant value and caused endless healing).  It must NOT reject a real
+        but LOW HP bar: at e.g. 10/20 HP only ~half the (already short) bar is
+        red, and after subtracting borders / empty section the red fraction can
+        be small — so the threshold is deliberately tiny (2%).  A genuine fake
+        (grey popup / damage number) has essentially 0% red and is still
+        rejected.
         '''
         if bar_img is None or bar_img.size == 0:
             return False
         b = bar_img[:, :, 0].astype(np.int16)
         g = bar_img[:, :, 1].astype(np.int16)
         r = bar_img[:, :, 2].astype(np.int16)
-        red = (r > 110) & (r - g > 40) & (r - b > 40)
+        # Slightly looser red test than before (darker reds like (195,10,42)
+        # BGR still qualify) so dim HP bars aren't missed.
+        red = (r > 90) & (r - g > 30) & (r - b > 30)
         return float(red.mean()) >= min_red_ratio
 
     def _monitor_loop(self):
