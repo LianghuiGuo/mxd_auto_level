@@ -1,4 +1,0 @@
-# Placeholder so this map shows up in the UI map list (patrol mode).
-# Patrol mode needs only this directory + the map->mob mapping in
-# config/config_data.yaml. Normal mode would additionally need map.png and
-# route*.png recorded here.

@@ -1,0 +1,9 @@
+path: dataset_snail
+train: images/train
+val: images/val
+auto_scan: false
+names:
+  0: blue_snail
+  1: red_snail
+  2: slime
+  3: player
