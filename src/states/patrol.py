@@ -19,92 +19,70 @@ class PatrolState(State):
         self._jump_ref_dir = None       # which walk direction the reference belongs to
         self._jump_last_time = 0.0      # last time we issued an auto-jump (cooldown)
 
-    def _current_progress_pos(self):
-        '''
-        Return a scalar-ish reference for "how far along the route" the player
-        is, preferring the minimap dot (absolute map coords, unaffected by the
-        camera following the character) and falling back to the on-screen x.
-
-        Returns a tuple (kind, value) where kind is "mm" or "screen" so we only
-        compare like-with-like (their pixel scales differ a lot).
-        '''
-        mm = getattr(self.bot, "loc_player_minimap", None)
-        if mm is not None and mm != (0, 0):
-            return ("mm", (float(mm[0]), float(mm[1])))
-        # fallback: on-screen x (camera-follow makes this less reliable but it's
-        # better than nothing when the minimap dot isn't found).
-        lp = getattr(self.bot, "loc_player", None) or (0, 0)
-        return ("screen", (float(lp[0]), float(lp[1])))
-
     def _maybe_auto_jump(self, walk_dir):
         '''
-        Decide whether the character is blocked by terrain while walking
+        Decide whether the character is blocked by terrain while patrol-walking
         ``walk_dir`` and, if so, set cmd_action="jump".  Returns True when a
         jump was issued this frame.
 
-        Trigger: the player keeps pushing the SAME direction but its real
-        position (minimap dot when available, else screen x) moved less than
-        cfg.patrol.jump_stuck_dist over cfg.patrol.jump_stuck_sec.
+        Progress is measured purely on the on-screen player x (self.bot
+        .loc_player).  The camera follows the character so a freely-walking
+        character's x still wanders as it moves between screen thirds, whereas a
+        character wedged in a wall/corner stays pinned to nearly the same x — so
+        "x barely changed while we kept pushing the same direction for
+        jump_stuck_sec" is a reliable blocked signal.
+
+        NOTE: we deliberately do NOT use loc_player_minimap here — in YOLO
+        patrol mode it is not refreshed and stays constant, which made moved==0
+        every frame and spam-jumped forever (the bug this replaces).
         '''
         cfg = self.bot.cfg["patrol"]
         if not cfg.get("jump_enable", True):
             return False
         if walk_dir not in ("left", "right"):
+            self._jump_ref_dir = None
             return False
 
         now = time.time()
-        kind, pos = self._current_progress_pos()
+        lp = getattr(self.bot, "loc_player", None) or (0, 0)
+        x = float(lp[0])
 
-        # Reset the reference whenever the walk direction changed or we don't
-        # have one yet — we only measure progress within a single direction.
+        # (Re)baseline whenever the walk direction changed or we don't have a
+        # reference yet — progress is only meaningful within one direction.
         if self._jump_ref_dir != walk_dir or self._jump_ref_pos is None:
             self._jump_ref_dir = walk_dir
-            self._jump_ref_pos = (kind, pos)
+            self._jump_ref_pos = x
             self._jump_ref_time = now
             return False
 
-        ref_kind, ref_pos = self._jump_ref_pos
-        # If the position source changed (minimap dot appeared/disappeared),
-        # re-baseline instead of comparing incomparable scales.
-        if ref_kind != kind:
-            self._jump_ref_pos = (kind, pos)
-            self._jump_ref_time = now
-            return False
-
-        moved = abs(pos[0] - ref_pos[0]) + abs(pos[1] - ref_pos[1])
-        # Minimap dots move only a few px per step, but the on-screen x can jump
-        # tens of px as the character walks, so use a larger "not moving"
-        # threshold for the screen fallback to avoid false auto-jumps while the
-        # character is actually walking fine.
-        stuck_dist = float(cfg.get("jump_stuck_dist", 3))
-        if kind == "screen":
-            stuck_dist = float(cfg.get("jump_stuck_dist_screen", 12))
+        moved = abs(x - self._jump_ref_pos)
+        stuck_dist = float(cfg.get("jump_stuck_dist_screen", 25))
 
         # Real progress -> re-baseline and don't jump.
         if moved > stuck_dist:
-            self._jump_ref_pos = (kind, pos)
+            self._jump_ref_pos = x
             self._jump_ref_time = now
             return False
 
-        # Not moving yet, but hasn't been long enough — keep waiting.
-        if now - self._jump_ref_time < float(cfg.get("jump_stuck_sec", 0.8)):
+        # Not stuck long enough yet — keep waiting.
+        if now - self._jump_ref_time < float(cfg.get("jump_stuck_sec", 1.2)):
             return False
 
-        # Blocked long enough: jump (respecting cooldown).
-        if now - self._jump_last_time < float(cfg.get("jump_cooldown", 0.7)):
+        # Respect the jump cooldown so we don't spam ALT every frame.
+        if now - self._jump_last_time < float(cfg.get("jump_cooldown", 1.0)):
             return False
 
         self.bot.cmd_action = "jump"
         self._jump_last_time = now
         # Re-baseline so we measure a fresh window after the hop.
-        self._jump_ref_pos = (kind, pos)
+        self._jump_ref_pos = x
         self._jump_ref_time = now
         try:
             from src.utils.logger import logger
             logger.info(
                 f"[Patrol] auto-jump: blocked walking {walk_dir} "
-                f"(moved={moved:.1f} <= {stuck_dist} over "
-                f"{cfg.get('jump_stuck_sec', 0.8)}s, src={kind})."
+                f"(x moved={moved:.1f} <= {stuck_dist} over "
+                f"{cfg.get('jump_stuck_sec', 1.2)}s)."
             )
         except Exception:
             pass
@@ -191,7 +169,12 @@ class PatrolState(State):
         # clobbers an attack.
         jumped = False
         if not getattr(self.bot, "_has_attackable_target", False):
-            jumped = self._maybe_auto_jump(self.bot.cmd_move_x)
+            jumped = self._maybe_auto_jump(patrol_dir)
+        else:
+            # Attacking: the character SHOULD stand still to hit the mob, so its
+            # x not moving is expected — reset the progress baseline so we don't
+            # instantly auto-jump the moment the mob dies and we resume walking.
+            self._jump_ref_dir = None
 
         # If player stuck for too long, perform a random command — but never
         # override a real attack we just decided on from mob detection, and not

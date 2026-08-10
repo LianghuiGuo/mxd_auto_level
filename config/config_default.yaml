@@ -349,12 +349,11 @@ patrol:
   # moves for `jump_stuck_sec`, it is blocked by terrain -> press jump to hop
   # over.  Set enable:false to disable.
   jump_enable: true               # 🦘 Master switch for patrol auto-jump.
-  jump_stuck_sec: 0.8             # ⏱️ How long the character must be "pushing but not moving" before jumping.
-  jump_stuck_dist: 3              # 📏 Movement (px) under which we consider it "not moving" over jump_stuck_sec,
-                                  #     measured on the MINIMAP dot (absolute map coords; small numbers).
-  jump_stuck_dist_screen: 12      # 📏 Same idea but used when only the on-screen x is available (no minimap
-                                  #     dot).  Larger because screen x swings more as the character walks.
-  jump_cooldown: 0.7              # ⏱️ Minimum seconds between two auto-jumps (avoid spamming jump).
+  jump_stuck_sec: 1.2             # ⏱️ How long the character must keep pushing the SAME walk direction with its
+                                  #     on-screen x barely moving before we treat it as terrain-blocked and jump.
+  jump_stuck_dist_screen: 25      # 📏 On-screen player-x movement (px) under which we consider it "not advancing"
+                                  #     over jump_stuck_sec.  Larger = only jump when truly pinned (fewer jumps).
+  jump_cooldown: 1.0              # ⏱️ Minimum seconds between two auto-jumps (avoid spamming the jump key).
 
 route_recoder:
   # 🎥 Route Recorder
