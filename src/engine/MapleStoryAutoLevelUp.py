@@ -1722,6 +1722,18 @@ class MapleStoryAutoBot:
                 monster_center = (mx1 + mw // 2, my1 + mh // 2)
                 dx = monster_center[0] - self.loc_player[0]
                 dy = monster_center[1] - self.loc_player[1]
+
+                # Vertical gate: a DIRECTIONAL attack is HORIZONTAL, so a mob
+                # sitting well above/below the player is "in the box" but can't
+                # actually be hit. Skip it when its y-offset from the player
+                # exceeds max_y_diff (<=0 disables the gate). AoE skills hit in
+                # all directions, so the gate does not apply to them.
+                if self.cfg["bot"]["attack"] == "directional":
+                    max_y_diff = int(
+                        self.cfg["directional_attack"].get("max_y_diff", 0))
+                    if max_y_diff > 0 and abs(dy) > max_y_diff:
+                        continue
+
                 distance = abs(dx) + abs(dy)  # Manhattan distance
 
                 if distance < min_distance:

@@ -124,6 +124,16 @@ class PatrolState(State):
         if self.bot.cmd_action == "attack":
             self.bot.cmd_action = "none"
 
+        # Patrol walks on flat ground: it must NEVER hold "down".  A stale
+        # cmd_move_y="down" (e.g. left over from update_cmd_by_random, which
+        # picks random.choice(["down","none"])) is catastrophic here — holding
+        # DOWN makes the character crouch, which SUPPRESSES the jump key, so
+        # auto-jump fires every frame but the character only twitches in place
+        # and stays wedged in the corner (x moved ~0) until the 10s global
+        # stuck-watchdog finally rerolls the direction.  Clear it every frame so
+        # patrol always starts from a clean, ground-walking state.
+        self.bot.cmd_move_y = "none"
+
         x, y = self.bot.loc_player
         h, w = self.bot.img_frame.shape[:2]
         loc_player_ratio = float(x)/float(w)
@@ -183,6 +193,13 @@ class PatrolState(State):
                 and not getattr(self.bot, "_has_attackable_target", False) \
                 and self.bot.is_player_stuck():
             self.bot.update_cmd_by_random()
+            # update_cmd_by_random may set cmd_move_y="down" and cmd_action=
+            # "none"; for patrol that re-introduces the crouch-wedged-in-corner
+            # bug and wastes the escape attempt.  Force a clean ground hop: no
+            # down, always jump, so the random new direction actually pops the
+            # character out of the corner.
+            self.bot.cmd_move_y = "none"
+            self.bot.cmd_action = "jump"
 
         # send command to keyboard controller
         self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \
