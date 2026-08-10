@@ -95,17 +95,52 @@ def load_player_sprites():
     return lst
 
 
-def load_classes():
-    """Return the class-name list (index = position).
+def load_classes(data_path=None, explicit_classes=None, dataset_dir="dataset",
+                 add_player="auto"):
+    """Return the class-name list (index = position) and (re)write it into the
+    dataset's data.yaml.
 
-    If data.yaml has `auto_scan: true`, the class list is (re)built by scanning
-    monster/ so adding a new monster folder needs zero manual edits.  The freshly
-    scanned list is written back into data.yaml `names:` so training AND runtime
-    inference share one stable index mapping.
+    Parameters
+    ----------
+    data_path : path to the data.yaml to read/update (default ml/data.yaml).
+    explicit_classes : if given, use EXACTLY these monster class names (in this
+        order) instead of scanning monster/ — this is how you build a
+        fixed-species model (e.g. blue_snail/red_snail/slime).
+    dataset_dir : the `path:` value written into data.yaml (relative to ml/), so
+        a specialised model can use its own images/labels folder.
+    add_player : "auto" appends the player class iff ml/player/ has sprites;
+        True forces it; False never adds it.
     """
-    path = os.path.join(HERE, "data.yaml")
-    with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    if data_path is None:
+        data_path = os.path.join(HERE, "data.yaml")
+    cfg = {}
+    if os.path.exists(data_path):
+        with open(data_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+
+    if explicit_classes is not None:
+        classes = list(explicit_classes)
+        # validate sprites exist so we fail early with a clear message
+        for name in classes:
+            if not glob.glob(os.path.join(REPO, "monster", name, f"{name}*.png")):
+                raise SystemExit(
+                    f"No sprites found for requested class '{name}' at "
+                    f"monster/{name}/{name}*.png")
+        want_player = (add_player is True) or (
+            add_player == "auto" and bool(glob.glob(
+                os.path.join(PLAYER_DIR, "*.png"))))
+        if want_player and PLAYER_CLASS not in classes:
+            classes.append(PLAYER_CLASS)
+        cfg["path"] = dataset_dir
+        cfg.setdefault("train", "images/train")
+        cfg.setdefault("val", "images/val")
+        cfg["auto_scan"] = False
+        cfg["names"] = {i: n for i, n in enumerate(classes)}
+        with open(data_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+        print(f"[classes] {len(classes)} fixed classes written to "
+              f"{data_path}: {classes}")
+        return classes
 
     if cfg.get("auto_scan"):
         classes = scan_monster_classes()
@@ -114,12 +149,13 @@ def load_classes():
                              "sprites were found under monster/.")
         # Append the player class LAST (stable index) whenever the user has put
         # at least one cut-out sprite into ml/player/.
-        if glob.glob(os.path.join(PLAYER_DIR, "*.png")):
+        if (add_player is True) or (add_player == "auto" and glob.glob(
+                os.path.join(PLAYER_DIR, "*.png"))):
             classes.append(PLAYER_CLASS)
         cfg["names"] = {i: n for i, n in enumerate(classes)}
-        with open(path, "w", encoding="utf-8") as f:
+        with open(data_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
-        print(f"[auto_scan] {len(classes)} classes written to data.yaml: "
+        print(f"[auto_scan] {len(classes)} classes written to {data_path}: "
               f"{classes}")
         return classes
 
@@ -243,10 +279,31 @@ def main():
     ap.add_argument("--val_frac", type=float, default=0.2)
     ap.add_argument("--max_mobs", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--classes", default=None,
+                    help="comma-separated monster class names to build a "
+                         "FIXED-species model, e.g. "
+                         "--classes blue_snail,red_snail,slime . "
+                         "Omit to auto-scan all monster/ folders.")
+    ap.add_argument("--data", default="data.yaml",
+                    help="data.yaml filename under ml/ to read/write "
+                         "(use a separate one per specialised model).")
+    ap.add_argument("--dataset", default="dataset",
+                    help="dataset folder name under ml/ for the generated "
+                         "images/labels (use a separate one per model).")
+    ap.add_argument("--no-player", action="store_true",
+                    help="never add the 'player' class even if ml/player/ has "
+                         "sprites.")
     args = ap.parse_args()
     random.seed(args.seed)
 
-    classes = load_classes()
+    explicit = None
+    if args.classes:
+        explicit = [c.strip() for c in args.classes.split(",") if c.strip()]
+
+    data_path = os.path.join(HERE, args.data)
+    add_player = False if args.no_player else "auto"
+    classes = load_classes(data_path=data_path, explicit_classes=explicit,
+                           dataset_dir=args.dataset, add_player=add_player)
     sprites = load_sprites(classes)
     bgs = load_backgrounds()
     if not sprites:
@@ -255,11 +312,12 @@ def main():
         raise SystemExit("No backgrounds found in ml/backgrounds/. Add some "
                          "clean game screenshots there first.")
 
+    ds_root = os.path.join(HERE, args.dataset)
     n_val = int(args.n * args.val_frac)
     for i in range(args.n):
         split = "val" if i < n_val else "train"
-        img_dir = os.path.join(HERE, "dataset", "images", split)
-        lbl_dir = os.path.join(HERE, "dataset", "labels", split)
+        img_dir = os.path.join(ds_root, "images", split)
+        lbl_dir = os.path.join(ds_root, "labels", split)
         os.makedirs(img_dir, exist_ok=True)
         os.makedirs(lbl_dir, exist_ok=True)
         bg = random.choice(bgs)
@@ -271,8 +329,10 @@ def main():
 
     print(f"Generated {args.n} synthetic images "
           f"({n_val} val / {args.n - n_val} train) from "
-          f"{len(bgs)} backgrounds and {len(classes)} classes.")
-    print("Next: python3 ml/train.py")
+          f"{len(bgs)} backgrounds and {len(classes)} classes "
+          f"into ml/{args.dataset}/.")
+    print(f"Next: python3 ml/train.py --data {args.data} "
+          f"--name {os.path.splitext(args.data)[0]}")
 
 
 if __name__ == "__main__":

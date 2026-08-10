@@ -53,6 +53,30 @@ python3 ml/synth.py --n 800          # 生成 800 张（自动 80% train / 20% v
 
 生成后可直接跳到 **步骤 4：训练**。
 
+### A3. 只训练固定几种怪（专用模型）
+
+想要一个只认某几种怪的小模型（更快、更少误检），用 `--classes` 指定怪种，并给它**独立的 data.yaml / 数据集 / 输出权重**，与全量模型互不干扰：
+
+```bash
+# 生成数据（只含蓝蜗牛/红蜗牛/绿水灵，不含 player）
+python ml/synth.py --n 800 --classes blue_snail,red_snail,slime \
+    --data data_snails.yaml --dataset dataset_snails --no-player
+
+# 训练（独立 run 名 + 独立输出权重）
+python ml/train.py --data data_snails.yaml --name snails \
+    --out models/mob_yolo_snails.pt
+```
+
+使用时在 config 里把 `yolo_model_path` 指向该权重：
+
+```yaml
+monster_detect:
+  mode: "yolo"
+  yolo_model_path: "models/mob_yolo_snails.pt"
+```
+
+> 想让专用模型也检测角色，去掉 `--no-player`（需 ml/player/ 有素材）。
+
 ---
 
 ## 路线 B：真实截图 + 手工标注

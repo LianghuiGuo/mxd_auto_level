@@ -27,18 +27,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
 
-def make_abs_data_yaml():
+def make_abs_data_yaml(data_name="data.yaml"):
     """Ultralytics resolves a RELATIVE `path:` against its own global datasets
     dir (e.g. D:\\...\\datasets), not against data.yaml's location, which makes
     training fail with 'images not found, missing path ...\\datasets\\dataset\\
-    images\\val'.  Rewrite `path:` to the ABSOLUTE ml/dataset dir into a temp
-    yaml so training works the same on every machine/OS without hand-editing.
-    Also validates that train/val actually contain images."""
-    src = os.path.join(HERE, "data.yaml")
+    images\\val'.  Rewrite `path:` to the ABSOLUTE dataset dir into a temp yaml
+    so training works the same on every machine/OS without hand-editing.  Also
+    validates that train/val actually contain images."""
+    src = os.path.join(HERE, data_name)
+    if not os.path.exists(src):
+        raise SystemExit(f"data yaml not found: {src}. Generate it with "
+                         f"ml/synth.py (use matching --data).")
     with open(src, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    cfg["path"] = os.path.join(HERE, "dataset")
+    # `path:` in the yaml is a folder name under ml/ (e.g. "dataset" or
+    # "dataset_snails"); resolve it to an absolute path here.
+    rel_ds = cfg.get("path", "dataset")
+    cfg["path"] = rel_ds if os.path.isabs(rel_ds) else os.path.join(HERE, rel_ds)
 
     # sanity-check that images exist so we fail with a clear message
     for split in ("train", "val"):
@@ -47,10 +53,11 @@ def make_abs_data_yaml():
         if n == 0:
             raise SystemExit(
                 f"No images in {d}.\n"
-                f"Run the synthetic-data generator first:\n"
-                f"    python ml/synth.py --n 800")
+                f"Run the synthetic-data generator first, e.g.:\n"
+                f"    python ml/synth.py --n 800 --data {data_name} "
+                f"--dataset {rel_ds}")
 
-    out = os.path.join(HERE, "data.abs.yaml")
+    out = os.path.join(HERE, os.path.splitext(data_name)[0] + ".abs.yaml")
     with open(out, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
     return out
@@ -67,6 +74,14 @@ def main():
     ap.add_argument("--device", default=None,
                     help="e.g. '0' for first GPU, 'cpu' to force CPU. "
                          "Default: auto-detect.")
+    ap.add_argument("--data", default="data.yaml",
+                    help="data.yaml filename under ml/ (match ml/synth.py "
+                         "--data) so you can train separate models.")
+    ap.add_argument("--name", default="mob_detector",
+                    help="run name under ml/runs/ (separate per model).")
+    ap.add_argument("--out", default="models/mob_yolo.pt",
+                    help="where to copy the best weights (repo-relative). Use a "
+                         "distinct path per model, e.g. models/mob_yolo_snails.pt")
     args = ap.parse_args()
 
     try:
@@ -75,7 +90,7 @@ def main():
         raise SystemExit(
             "ultralytics is not installed. Run: pip install ultralytics")
 
-    data_yaml = make_abs_data_yaml()
+    data_yaml = make_abs_data_yaml(args.data)
 
     # Cache base weights in a FIXED project dir (ml/weights/) so we don't
     # re-download yolo11n.pt every run just because we're in a different cwd.
@@ -114,18 +129,20 @@ def main():
         # precision.  AMP still works; we just avoid the pointless download.
         amp=False,
         project=os.path.join(HERE, "runs"),
-        name="mob_detector",
+        name=args.name,
         exist_ok=True,
     )
 
-    # Locate best.pt and copy to models/mob_yolo.pt for the engine to load.
-    best = os.path.join(HERE, "runs", "mob_detector", "weights", "best.pt")
+    # Locate best.pt and copy to the requested output path for the engine.
+    best = os.path.join(HERE, "runs", args.name, "weights", "best.pt")
     if os.path.exists(best):
-        os.makedirs(os.path.join(REPO, "models"), exist_ok=True)
-        dest = os.path.join(REPO, "models", "mob_yolo.pt")
+        dest = args.out if os.path.isabs(args.out) \
+            else os.path.join(REPO, args.out)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy(best, dest)
         print(f"\nCopied best weights -> {dest}")
-        print("Set config monster_detect.mode: 'yolo' to use it.")
+        print(f"Set config monster_detect.mode: 'yolo' and "
+              f"yolo_model_path: '{args.out}' to use it.")
     else:
         print(f"[warn] could not find {best}; check training output.")
 
