@@ -7,6 +7,7 @@ When player's HP/MP drop to specific threshold, it'd press key to drink potion
 import threading
 import time
 import cv2
+import numpy as np
 
 # Local Import
 from src.utils.logger import logger
@@ -168,6 +169,29 @@ class HealthMonitor:
         if len(loc_size_bars) != 3:
             return (None, None, None)
 
+        # Identity check on the HP bar (the left-most of the three).  The
+        # contour finder can occasionally lock onto a NON-HP white-bordered UI
+        # element (damage numbers, quest/notice popups, buff bars, …) that
+        # sneaks into the 3-bar set.  Such a fake "HP bar" is mostly grey/white
+        # inside, so get_bar_percent reports a constant low value (observed:
+        # HP stuck at 15.9%), and the bot then drinks potions forever on full
+        # HP.  A REAL HP bar's filled portion is red (R clearly > G and > B).
+        # If the left-most bar has almost no red fill, treat this frame's read
+        # as invalid (return None) so the monitor keeps its last good value and
+        # does NOT heal.
+        hp_x, hp_y, hp_w, hp_h = loc_size_bars[0]
+        hp_img = img_frame[hp_y:hp_y + hp_h, hp_x:hp_x + hp_w]
+        if not self._looks_like_hp_bar(hp_img):
+            if not getattr(type(self), "_hp_fake_warned", False):
+                type(self)._hp_fake_warned = True
+                logger.warning(
+                    "[Health Monitor] Left-most detected bar does not look "
+                    "like an HP bar (little/no red fill).  Ignoring this HP "
+                    "read to avoid drinking potions on full HP.  If this "
+                    "repeats, the HP bar ROI / detection needs calibration."
+                )
+            return (None, None, None)
+
         # Update loc_size_bars
         self.loc_size_bars = loc_size_bars
 
@@ -176,6 +200,23 @@ class HealthMonitor:
         for x, y, w, h in loc_size_bars:
             percent_bars.append(get_bar_percent(img_frame[y:y+h, x:x+w]))
         return percent_bars
+
+    @staticmethod
+    def _looks_like_hp_bar(bar_img, min_red_ratio=0.10):
+        '''
+        Heuristic: a real MapleStory HP bar has a RED filled section.  Return
+        True if a meaningful fraction of the bar's pixels are red-dominant
+        (R notably greater than both G and B).  Used to reject non-HP white
+        UI elements that the contour detector sometimes mistakes for the HP
+        bar (which caused constant-value HP reads and endless healing).
+        '''
+        if bar_img is None or bar_img.size == 0:
+            return False
+        b = bar_img[:, :, 0].astype(np.int16)
+        g = bar_img[:, :, 1].astype(np.int16)
+        r = bar_img[:, :, 2].astype(np.int16)
+        red = (r > 110) & (r - g > 40) & (r - b > 40)
+        return float(red.mean()) >= min_red_ratio
 
     def _monitor_loop(self):
         '''
