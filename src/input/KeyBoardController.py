@@ -2371,7 +2371,21 @@ class KeyBoardController():
             ### Action Command ###
             ######################
             if self.cmd_action == "jump":
-                do_action_key("jump", self.cfg["key"]["jump"])
+                # Throttle jumps.  Unlike attack (which clears cmd_action after
+                # one press), a route "jump" waypoint keeps cmd_action=="jump"
+                # for as long as the player sits on that colour code.  Firing
+                # the jump key EVERY frame means we re-press mid-air before the
+                # previous hop lands, so the character never gets a clean full
+                # jump and can stay pinned under a ledge forever (observed:
+                # loc_player frozen, "do_action_key kind='jump'" every frame,
+                # zero movement).  Pressing at most once per jump_min_interval
+                # gives each hop time to complete (land) before the next.
+                _now_jump = time.time()
+                _jump_iv = float(self.cfg.get("key", {}).get(
+                    "jump_min_interval", 0.6))
+                if _now_jump - self.t_last_jump_down >= _jump_iv:
+                    do_action_key("jump", self.cfg["key"]["jump"])
+                    self.t_last_jump_down = _now_jump
             elif self.cmd_action == "teleport":
                 do_action_key("teleport", self.cfg["key"]["teleport"])
             elif self.cmd_action == "attack":

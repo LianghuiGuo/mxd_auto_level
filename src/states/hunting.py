@@ -75,6 +75,15 @@ class HuntingState(State):
         if not getattr(self.bot, "_has_attackable_target", False) \
                 and self.bot.is_player_stuck():
             self.bot.update_cmd_by_random()
+            # update_cmd_by_random may set cmd_move_y="down" and cmd_action=
+            # "none".  When stuck on a jump waypoint (route colour code
+            # (0,255,255) "right + jump"), holding DOWN makes the character
+            # crouch, which SUPPRESSES the jump key — so it can never hop over
+            # the ledge and stays pinned forever (loc_player frozen, jumping
+            # every frame with zero movement).  Force a clean hop instead: no
+            # down, always jump.
+            self.bot.cmd_move_y = "none"
+            self.bot.cmd_action = "jump"
 
         # send command to keyboard controller
         self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \
