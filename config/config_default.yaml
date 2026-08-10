@@ -24,6 +24,11 @@ key:
   directional_attack: "w"   # ⚔️ Basic directional attack (e.g., Magic Claw or throwing stars)
   teleport: "e"             # 🌀 Teleport skill. Set to "" if not usable
   jump: "space"             # 🦘 Jump key
+  jump_min_interval: 0.6    # ⏱️ Min seconds between jump key presses. A route "jump" waypoint holds
+                            #    cmd_action="jump" every frame; without this the key re-fires mid-air
+                            #    before landing, so the character never completes a full hop and can get
+                            #    pinned under a ledge. 0.6s lets each jump land before the next. Lower =
+                            #    more frequent hops; raise if jumps still feel interrupted.
   add_hp: "1"               # ❤️ Use HP potion. Set to "" to disable auto-healing
   add_mp: "2"               # 💧 Use MP potion. Set to "" to disable auto-mana
   return_home: "home"       # 🔁 Key to use return home scroll.
@@ -346,7 +351,7 @@ minimap:
   #    to log/minimap_debug_*.png and print the exact manual_roi to paste here.
   #    Use this to measure manual_roi in the engine's coordinate system instead
   #    of guessing from OS screenshots (which have a different resolution).
-  debug_dump: true
+  debug_dump: false
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
 
 patrol:
