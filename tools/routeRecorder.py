@@ -335,8 +335,14 @@ class RouteRecorder():
 
         # Get minimap from game window
         if self.is_first_frame:
-            _manual_roi = (self.cfg.get("minimap") or {}).get("manual_roi")
-            mm = get_minimap_loc_size(self.img_frame, manual_roi=_manual_roi)
+            _mm_cfg = self.cfg.get("minimap") or {}
+            _manual_roi = _mm_cfg.get("manual_roi")
+            mm = get_minimap_loc_size(
+                self.img_frame,
+                manual_roi=_manual_roi,
+                max_w_ratio=float(_mm_cfg.get("auto_max_w_ratio", 0.18)),
+                max_h_ratio=float(_mm_cfg.get("auto_max_h_ratio", 0.18)),
+            )
             if mm is None:
                 # Don't crash: the minimap white-frame detector found nothing
                 # (minimap collapsed, or its border isn't pure white(255,255,255)
@@ -371,6 +377,33 @@ class RouteRecorder():
                 h -= 2
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
+
+            # --- Minimap ROI debug dump ------------------------------------
+            # Writes the recorder's OWN processed frame + the detected ROI and
+            # prints the exact manual_roi (in this frame's coordinate system,
+            # so no OS-screenshot resolution guesswork). Enable via
+            # minimap.debug_dump: true.
+            if bool(_mm_cfg.get("debug_dump", False)):
+                try:
+                    os.makedirs("log", exist_ok=True)
+                    H, W = self.img_frame.shape[:2]
+                    cv2.imwrite("log/minimap_debug_frame.png", self.img_frame)
+                    if self.img_minimap.size:
+                        cv2.imwrite("log/minimap_debug_crop.png",
+                                    self.img_minimap)
+                    overlay = self.img_frame.copy()
+                    cv2.rectangle(overlay, (x, y), (x + w - 1, y + h - 1),
+                                  (0, 0, 255), 1)
+                    cv2.imwrite("log/minimap_debug_overlay.png", overlay)
+                    logger.info(
+                        "[minimap debug] processed_frame_wh=(%d,%d) detected "
+                        "ROI [x=%d, y=%d, w=%d, h=%d].  To lock it, set in "
+                        "config:\n  minimap:\n    manual_roi: [%d, %d, %d, %d]\n"
+                        "Artifacts in log/minimap_debug_{frame,crop,overlay}.png"
+                        % (W, H, x, y, w, h, x, y, w, h)
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[minimap debug] dump failed: {e!r}")
         else:
             x, y = self.loc_minimap
             h, w = self.img_minimap.shape[:2]

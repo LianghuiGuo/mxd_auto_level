@@ -346,7 +346,7 @@ minimap:
   #    to log/minimap_debug_*.png and print the exact manual_roi to paste here.
   #    Use this to measure manual_roi in the engine's coordinate system instead
   #    of guessing from OS screenshots (which have a different resolution).
-  debug_dump: false
+  debug_dump: true
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
 
 patrol:
