@@ -334,6 +334,19 @@ minimap:
   # 裁剪，裁出的高度会随小地图内黄点/亮平台位置每帧漂移几像素（例如 91 vs 85），
   # 导致 minimap→map 模板匹配时好时坏（score 时而 1.0），黄点定位漂移、路线时准时不准。
   manual_roi: [1, 13, 161, 85]
+  # 🚧 Auto-detect size caps (fraction of the FRAME w/h). The minimap lives in
+  #    the top-left corner and is small; on maps whose scenery shares the
+  #    minimap's brown/beige border colour (e.g. 明珠港郊外) the auto-detector
+  #    used to bleed OUTWARD, so the red ROI box spilled far past the real
+  #    minimap (bottom-right too big). These caps reject/clamp such oversized
+  #    detections. Raise them only if your minimap is genuinely larger.
+  auto_max_w_ratio: 0.18
+  auto_max_h_ratio: 0.18
+  # 🐞 Set true to dump the engine's OWN processed frame + detected ROI numbers
+  #    to log/minimap_debug_*.png and print the exact manual_roi to paste here.
+  #    Use this to measure manual_roi in the engine's coordinate system instead
+  #    of guessing from OS screenshots (which have a different resolution).
+  debug_dump: false
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
 
 patrol:

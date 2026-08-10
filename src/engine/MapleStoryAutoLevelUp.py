@@ -3388,6 +3388,41 @@ class MapleStoryAutoBot:
         logger.warning("[update_cmd_by_random]"\
                     f"{self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}")
 
+    def _dump_minimap_debug(self, x, y, w, h):
+        '''
+        Write minimap-detection debug artifacts to log/ and print the exact
+        manual_roi to use.  Throttled to once every ~2s so enabling the flag
+        does not spam the disk.  Coordinates (x, y, w, h) are in the engine's
+        working-size frame, i.e. exactly what minimap.manual_roi expects.
+        '''
+        now = time.time()
+        if now - getattr(self, "_mm_dump_last_t", 0.0) < 2.0:
+            return
+        self._mm_dump_last_t = now
+        try:
+            os.makedirs("log", exist_ok=True)
+            H, W = self.img_frame.shape[:2]
+            # full processed frame (matches detector coordinate system)
+            cv2.imwrite("log/minimap_debug_frame.png", self.img_frame)
+            # detected crop
+            crop = self.img_frame[y:y+h, x:x+w]
+            if crop.size:
+                cv2.imwrite("log/minimap_debug_crop.png", crop)
+            # frame with ROI drawn
+            overlay = self.img_frame.copy()
+            cv2.rectangle(overlay, (x, y), (x + w - 1, y + h - 1),
+                          (0, 0, 255), 1)
+            cv2.imwrite("log/minimap_debug_overlay.png", overlay)
+            logger.info(
+                "[minimap debug] processed_frame_wh=(%d,%d) detected ROI "
+                "[x=%d, y=%d, w=%d, h=%d].  To lock it, set in config:\n"
+                "  minimap:\n    manual_roi: [%d, %d, %d, %d]\n"
+                "Artifacts written to log/minimap_debug_{frame,crop,overlay}.png"
+                % (W, H, x, y, w, h, x, y, w, h)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[minimap debug] dump failed: {e!r}")
+
     def check_reach_goal(self):
         if self.cmd_action == "goal":
             # Switch to next route map
@@ -3592,9 +3627,14 @@ class MapleStoryAutoBot:
         ### Get Minimap ###
         ###################
         # Get minimap coordinate and size on game window
-        _manual_roi = (self.cfg.get("minimap") or {}).get("manual_roi")
-        minimap_result = get_minimap_loc_size(self.img_frame,
-                                              manual_roi=_manual_roi)
+        _mm_cfg = self.cfg.get("minimap") or {}
+        _manual_roi = _mm_cfg.get("manual_roi")
+        minimap_result = get_minimap_loc_size(
+            self.img_frame,
+            manual_roi=_manual_roi,
+            max_w_ratio=float(_mm_cfg.get("auto_max_w_ratio", 0.18)),
+            max_h_ratio=float(_mm_cfg.get("auto_max_h_ratio", 0.18)),
+        )
         if minimap_result is None:
             if time.time() - self.t_last_minimap_update > 30:
                 # Unable to get minimap for 30 seconds -> assume it's login screen
@@ -3628,6 +3668,18 @@ class MapleStoryAutoBot:
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
             self.t_last_minimap_update = time.time()
+
+            # --- Minimap ROI debug dump ------------------------------------
+            # When minimap.debug_dump is true, write out (a) the FULL frame the
+            # engine actually processes (already resized to the working size,
+            # so its pixel coords match what the detector uses — NOT a raw OS
+            # window screenshot), (b) the detected minimap crop, and (c) a copy
+            # of the frame with the ROI drawn on it, plus the exact numbers to
+            # paste into config as minimap.manual_roi.  This removes ALL of the
+            # screenshot-resolution guesswork: the printed [x, y, w, h] are in
+            # the engine's own coordinate system.
+            if bool(_mm_cfg.get("debug_dump", False)):
+                self._dump_minimap_debug(x, y, w, h)
 
         self.profiler.mark("Get Minimap Location and Size")
 

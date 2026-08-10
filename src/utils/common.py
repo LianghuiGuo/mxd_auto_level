@@ -406,7 +406,8 @@ def to_standard_hsv(color_hsv):
     v_std = v / 255 * 100
     return (h_std, s_std, v_std)
 
-def get_minimap_loc_size(img_frame, manual_roi=None):
+def get_minimap_loc_size(img_frame, manual_roi=None,
+                         max_w_ratio=0.18, max_h_ratio=0.18):
     '''
     Detects the location and size of the minimap within the game frame.
 
@@ -416,6 +417,17 @@ def get_minimap_loc_size(img_frame, manual_roi=None):
         minimap sits at a fixed spot in this client, so hand-measuring it once
         is the most reliable option — no black frame, no extra strip below.
         The rectangle is clamped to the frame bounds.
+
+    max_w_ratio / max_h_ratio : float
+        Upper bound on the detected minimap size as a fraction of the FRAME
+        width/height.  The minimap always lives in the top-left corner and is
+        small (~12% of the frame width, ~12% of its height on this client).
+        Maps whose surrounding scenery is the same brown/beige as the minimap
+        border (e.g. 明珠港郊外: beaches + dirt) make the connected-component
+        border detector bleed OUTWARD into the game art, returning a box whose
+        bottom-right corner spills far past the real minimap.  Rejecting /
+        clamping candidates larger than these ratios keeps the ROI glued to the
+        actual minimap instead of the surrounding terrain.
 
     The function works by:
     - Thresholding the image get pure white(255,255,255) pixels.
@@ -492,6 +504,9 @@ def get_minimap_loc_size(img_frame, manual_roi=None):
             x_minimap += x0
             y_minimap += y0
 
+            # Same sane-size clamp as the brown-frame path.
+            w_minimap = min(w_minimap, int(img_frame.shape[1] * max_w_ratio))
+            h_minimap = min(h_minimap, int(img_frame.shape[0] * max_h_ratio))
             return x_minimap, y_minimap, w_minimap, h_minimap
 
     # --- Fallback: dark-brown hollow frame (冒险岛怀旧服 minimap) -----------
@@ -510,10 +525,18 @@ def get_minimap_loc_size(img_frame, manual_roi=None):
     mask_brown = cv2.dilate(mask_brown, np.ones((3, 3), np.uint8), iterations=2)
     num_labels, labels, stats, centroids = \
         cv2.connectedComponentsWithStats(mask_brown, connectivity=8)
+    Hf, Wf = img_frame.shape[:2]
+    max_w = int(Wf * max_w_ratio)
+    max_h = int(Hf * max_h_ratio)
     best = None
     for i in range(1, num_labels):
         x0, y0, rw, rh, area = stats[i]
         if rw < 100 or rh < 80:
+            continue
+        # Reject components that are clearly too big to be the minimap: those
+        # are the border colour bleeding into the surrounding game art.  The
+        # real minimap frame stays comfortably under max_w/max_h.
+        if rw > max_w or rh > max_h:
             continue
         # Minimap sits in the top-left corner of the frame.
         if x0 > int(img_frame.shape[1] * 0.35) or \
@@ -583,6 +606,10 @@ def get_minimap_loc_size(img_frame, manual_roi=None):
         y_minimap = y0 + map_y0
         w_minimap = map_x1 - map_x0 + 1
         h_minimap = map_y1 - map_y0 + 1
+        # Final clamp: never let the ROI exceed the sane size cap even if the
+        # component squeaked through (e.g. the dark run ran a little long).
+        w_minimap = min(w_minimap, max_w)
+        h_minimap = min(h_minimap, max_h)
         if w_minimap > 40 and h_minimap > 20:
             return x_minimap, y_minimap, w_minimap, h_minimap
 
