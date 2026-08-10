@@ -619,6 +619,29 @@ def get_minimap_loc_size(img_frame, manual_roi=None,
     # logger.warning("Minimap not found in the game frame.")
     return None  # minimap not found
 
+def _largest_blob_centroid(mask, min_area=3):
+    """Centroid (x, y) of the LARGEST connected component in a binary mask.
+
+    Returns None if no component reaches ``min_area`` pixels.  Used to isolate
+    the compact player dot from scattered same-coloured scenery (e.g. yellow
+    trees on the minimap), which a global centroid would otherwise average in.
+    """
+    if mask is None:
+        return None
+    m = (mask > 0).astype(np.uint8)
+    num, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        m, connectivity=8)
+    best_i, best_area = -1, 0
+    for i in range(1, num):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area > best_area:
+            best_area, best_i = area, i
+    if best_i < 0 or best_area < min_area:
+        return None
+    cx, cy = centroids[best_i]
+    return (int(round(float(cx))), int(round(float(cy))))
+
+
 def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 255),
                                     debug_label="player"):
     """
@@ -665,14 +688,16 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
         last_mask = mask
         last_n = n
         if n >= 4:
-            # Compute the centroid directly from the mask.  Using
-            # cv2.findNonZero(...).mean(axis=0)[0] was fragile: depending on
-            # the OpenCV build / mask shape the reduction could collapse to a
-            # scalar, and the subsequent avg[0] then raised
-            # "IndexError: invalid index to scalar variable".  np.where is
-            # unambiguous and returns row (y) / col (x) index arrays.
-            ys, xs = np.where(mask > 0)
-            return (int(round(float(xs.mean()))), int(round(float(ys.mean()))))
+            # Use the LARGEST connected yellow blob, not the centroid of ALL
+            # matching pixels.  On maps whose minimap art contains other yellow
+            # things (yellow trees / terrain highlights, like 明珠港郊外) the
+            # global centroid gets dragged toward that scenery — the reported
+            # dot then floats in the middle of the map (the user's "黄点定位不
+            # 对").  The real player dot is a single compact bright blob, so
+            # picking the biggest connected component isolates it.
+            c = _largest_blob_centroid(mask)
+            if c is not None:
+                return c
 
     # --- Robust "yellowness" fallback --------------------------------------
     # The reference-colour + tolerance approach fails when the client's player
@@ -689,8 +714,9 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
               (g.astype(np.int32) + r - 2 * b >= 150)).astype(np.uint8)
     n_y = int(yellow.sum())
     if n_y >= 4:
-        ys, xs = np.where(yellow > 0)
-        return (int(round(float(xs.mean()))), int(round(float(ys.mean()))))
+        c = _largest_blob_centroid(yellow * 255)
+        if c is not None:
+            return c
 
     # --- Diagnostic path: all tolerances failed. ---------------------------
     # Dump the last (widest-tolerance) mask so the user can visualise what

@@ -413,8 +413,13 @@ class RouteRecorder():
         black_mask = np.all(self.img_minimap == [0, 0, 0], axis=-1)
         self.img_minimap[black_mask] = [1, 1, 1]
 
-        # Get player location on minimap
-        loc_player_minimap = get_player_location_on_minimap(self.img_minimap)
+        # Get player location on minimap. Pass the client-specific player_color
+        # from config so the primary (tolerance) path works instead of always
+        # falling through to the generic yellowness heuristic.
+        _pc = (self.cfg.get("minimap") or {}).get("player_color",
+                                                  (136, 255, 255))
+        loc_player_minimap = get_player_location_on_minimap(
+            self.img_minimap, minimap_player_color=tuple(_pc))
         if loc_player_minimap:
             self.loc_player_minimap = loc_player_minimap
         else:
