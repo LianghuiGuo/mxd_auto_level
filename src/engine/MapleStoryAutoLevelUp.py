@@ -607,6 +607,24 @@ class MapleStoryAutoBot:
         '''
         method_used = "none"
 
+        # --- Stage 0: YOLO player detection ----------------------------------
+        # When running the neural detector we locate the character directly from
+        # its 'player' bounding box.  This is far more robust than the fragile
+        # nametag / party-red template matching (which mismatched on this
+        # client) and needs no per-client calibration.  We only try it in
+        # 'yolo' mode; if the model isn't loaded or no player is detected this
+        # frame we fall through to the legacy stages.
+        if self.cfg["monster_detect"]["mode"] == "yolo":
+            try:
+                yolo_player = self._get_yolo_player_location()
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[player_cascade] yolo player raised: {e!r}")
+                yolo_player = None
+            if yolo_player is not None:
+                self._nt_last_good_loc = yolo_player
+                self._nt_last_good_t = time.time()
+                return yolo_player, None, "yolo_player"
+
         # --- Stage 1: party red bar ------------------------------------------
         # If the anti-FP tracker convicted Stage 1 of matching a static UI
         # element (top-right HP bar / red decoration) we skip it entirely for
@@ -1734,65 +1752,124 @@ class MapleStoryAutoBot:
         best_idx = np.argpartition(scores, cap - 1)[:cap]
         return list(zip(xs[best_idx], ys[best_idx]))
 
-    def _detect_monsters_yolo(self, img_roi, x0, y0):
+    def _ensure_yolo_model(self):
         '''
-        Run YOLO inference on the ROI and return detections in the engine's
-        standard monster-dict format, or None if the model can't be used (so
-        the caller can fall back to template matching).
-
-        Each returned dict matches what template matching produces:
-            {"name": <class name>, "position": (x, y) top-left in FULL-frame
-             coords, "size": (h, w), "score": <confidence 0..1>}
-
-        The model is loaded lazily on first use and cached on the instance.
-        A failed load is remembered so we don't retry every frame.
+        Lazily load and cache the YOLO model on the instance.  Returns the model
+        or None if it can't be used (missing ultralytics / missing weights /
+        load error).  A failed load is remembered so we don't retry every frame.
         '''
         if getattr(self, "_yolo_load_failed", False):
             return None
-
         model = getattr(self, "_yolo_model", None)
-        if model is None:
-            try:
-                from ultralytics import YOLO
-            except ImportError:
-                logger.error("[YOLO] ultralytics not installed. "
-                             "Run: pip install ultralytics. "
-                             "Falling back to template matching.")
-                self._yolo_load_failed = True
-                return None
-            model_path = self.cfg["monster_detect"].get(
-                "yolo_model_path", "models/mob_yolo.pt")
-            if not os.path.exists(model_path):
-                logger.error(f"[YOLO] model file not found: {model_path}. "
-                             "Train it (ml/train.py) or set "
-                             "monster_detect.yolo_model_path. Falling back to "
-                             "template matching.")
-                self._yolo_load_failed = True
-                return None
-            try:
-                model = YOLO(model_path)
-                self._yolo_model = model
-                logger.info(f"[YOLO] loaded model {model_path} "
-                            f"classes={model.names}")
-            except Exception as e:  # noqa: BLE001
-                logger.error(f"[YOLO] failed to load model: {e}. "
-                             "Falling back to template matching.")
-                self._yolo_load_failed = True
-                return None
-
-        if img_roi is None or img_roi.size == 0:
-            return []
-
-        conf = float(self.cfg["monster_detect"].get("yolo_conf_thres", 0.4))
+        if model is not None:
+            return model
         try:
-            results = model.predict(img_roi, conf=conf, verbose=False)
+            from ultralytics import YOLO
+        except ImportError:
+            logger.error("[YOLO] ultralytics not installed. "
+                         "Run: pip install ultralytics. "
+                         "Falling back to template matching.")
+            self._yolo_load_failed = True
+            return None
+        model_path = self.cfg["monster_detect"].get(
+            "yolo_model_path", "models/mob_yolo.pt")
+        if not os.path.exists(model_path):
+            logger.error(f"[YOLO] model file not found: {model_path}. "
+                         "Train it (ml/train.py) or set "
+                         "monster_detect.yolo_model_path. Falling back to "
+                         "template matching.")
+            self._yolo_load_failed = True
+            return None
+        try:
+            model = YOLO(model_path)
+            self._yolo_model = model
+            logger.info(f"[YOLO] loaded model {model_path} "
+                        f"classes={model.names}")
+            return model
         except Exception as e:  # noqa: BLE001
-            logger.error(f"[YOLO] inference error: {e}. Falling back.")
+            logger.error(f"[YOLO] failed to load model: {e}. "
+                         "Falling back to template matching.")
             self._yolo_load_failed = True
             return None
 
+    def _run_yolo_full_frame(self):
+        '''
+        Run ONE YOLO inference over the WHOLE frame and cache the raw detections
+        (both monsters AND the player) for this frame, so the player-location
+        cascade and the monster-in-range check can share a single forward pass.
+
+        Returns a list of detection dicts in the engine's standard shape
+        (see _detect_monsters_yolo), or None if YOLO is unavailable.  The result
+        is memoised per frame in ``self._yolo_frame_dets``; call
+        ``self._yolo_frame_id`` bookkeeping is keyed on the frame object id.
+        '''
+        model = self._ensure_yolo_model()
+        if model is None:
+            return None
+        img = getattr(self, "img_frame", None)
+        if img is None or img.size == 0:
+            return []
+
+        # memoise per frame: only run once even if called from both the player
+        # cascade and get_monsters_in_range within the same frame.
+        frame_key = id(img)
+        if getattr(self, "_yolo_frame_key", None) == frame_key and \
+           getattr(self, "_yolo_frame_dets", None) is not None:
+            return self._yolo_frame_dets
+
+        conf = float(self.cfg["monster_detect"].get("yolo_conf_thres", 0.4))
+        try:
+            results = model.predict(img, conf=conf, verbose=False)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[YOLO] full-frame inference error: {e}.")
+            self._yolo_load_failed = True
+            return None
+
+        dets = self._yolo_results_to_dicts(results, model.names, 0, 0)
+        self._yolo_frame_key = frame_key
+        self._yolo_frame_dets = dets
+        return dets
+
+    def _get_yolo_player_location(self):
+        '''
+        Locate the player from the full-frame YOLO detections.
+
+        Returns the (x, y) player CENTER in full-frame coords using the highest
+        confidence 'player' box, or None if YOLO is unavailable / no player was
+        detected this frame.  A configurable vertical offset
+        (``monster_detect.yolo_player_offset_y``, default 0) shifts the reported
+        point up/down from the box center (e.g. to aim at the feet or torso to
+        match where the old nametag/party-red pipelines placed loc_player).
+        '''
+        dets = self._run_yolo_full_frame()
+        if not dets:
+            return None
+        players = [d for d in dets if d.get("name") == "player"]
+        if not players:
+            return None
+        # dets store score as (1 - conf) ascending → smallest score = strongest.
+        best = min(players, key=lambda d: d.get("score", 1.0))
+        px, py = best["position"]      # top-left, full-frame
+        bh, bw = best["size"]          # (h, w)
+        cx = px + bw // 2
+        cy = py + bh // 2
+        cy += int(self.cfg["monster_detect"].get("yolo_player_offset_y", 0))
+
+        # Debug viz: draw the player box + center so it's obvious in game window.
+        try:
+            draw_rectangle(
+                self.img_frame_debug, (px, py),
+                (bh, bw), (255, 0, 255), "player")
+            cv2.drawMarker(self.img_frame_debug, (cx, cy),
+                           (255, 0, 255), cv2.MARKER_CROSS, 20, 2)
+        except Exception:  # noqa: BLE001
+            pass
+        return (cx, cy)
+
+    def _yolo_results_to_dicts(self, results, names, x0, y0):
+        '''Convert ultralytics results into the engine's standard detection
+        dicts, converting ROI-local coords to full-frame via (x0, y0).'''
         monsters = []
-        names = model.names
         for r in results:
             boxes = getattr(r, "boxes", None)
             if boxes is None:
@@ -1817,6 +1894,35 @@ class MapleStoryAutoBot:
                     "score": 1.0 - score,
                 })
         return monsters
+
+    def _detect_monsters_yolo(self, img_roi, x0, y0):
+        '''
+        Return YOLO detections inside the attack ROI in the engine's standard
+        monster-dict format, or None if the model can't be used (so the caller
+        can fall back to template matching).
+
+        We reuse the cached FULL-FRAME detections (computed once per frame by
+        _run_yolo_full_frame, e.g. for player localisation) and simply keep the
+        boxes whose center falls inside the ROI — this avoids a second forward
+        pass.  The 'player' class is excluded so the character is never treated
+        as an attackable monster.
+        '''
+        dets = self._run_yolo_full_frame()
+        if dets is None:
+            return None
+        x1 = x0 + (img_roi.shape[1] if img_roi is not None else 0)
+        y1 = y0 + (img_roi.shape[0] if img_roi is not None else 0)
+        out = []
+        for d in dets:
+            if d.get("name") == "player":
+                continue
+            dx, dy = d["position"]
+            dh, dw = d["size"]
+            ccx = dx + dw // 2
+            ccy = dy + dh // 2
+            if x0 <= ccx < x1 and y0 <= ccy < y1:
+                out.append(d)
+        return out
 
     def get_monsters_in_range(self, top_left, bottom_right):
         '''
@@ -3337,6 +3443,12 @@ class MapleStoryAutoBot:
         # state skipped detection, and patrol read a stale _has_attackable_target
         # → wrong walk/attack direction.
         self._mob_detection_ran_this_frame = False
+
+        # Invalidate the per-frame full-frame YOLO cache so this frame runs a
+        # fresh inference (the player cascade and get_monsters_in_range share
+        # that single pass via _run_yolo_full_frame).
+        self._yolo_frame_key = None
+        self._yolo_frame_dets = None
 
         # Check if need viz window
         self.is_show_debug_window = self.is_need_show_debug_window

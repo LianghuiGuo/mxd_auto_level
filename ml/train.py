@@ -76,7 +76,32 @@ def main():
             "ultralytics is not installed. Run: pip install ultralytics")
 
     data_yaml = make_abs_data_yaml()
-    model = YOLO(args.model)
+
+    # Cache base weights in a FIXED project dir (ml/weights/) so we don't
+    # re-download yolo11n.pt every run just because we're in a different cwd.
+    # If args.model is a bare filename: reuse the cached copy when present,
+    # otherwise download it (to cwd) then move it into the cache for next time.
+    weights_dir = os.path.join(HERE, "weights")
+    os.makedirs(weights_dir, exist_ok=True)
+    model_arg = args.model
+    cached = None
+    if not os.path.isabs(model_arg) and os.path.dirname(model_arg) == "":
+        cached = os.path.join(weights_dir, model_arg)
+        if os.path.exists(cached):
+            model_arg = cached
+
+    model = YOLO(model_arg)
+
+    # If we just downloaded a bare-name model, stash it in the cache so future
+    # runs skip the download.
+    if cached is not None and not os.path.exists(cached):
+        downloaded = os.path.join(os.getcwd(), args.model)
+        if os.path.exists(downloaded):
+            try:
+                shutil.copy(downloaded, cached)
+                print(f"[weights] cached base model -> {cached}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[weights] could not cache base model: {e}")
 
     results = model.train(
         data=data_yaml,
@@ -84,6 +109,10 @@ def main():
         imgsz=args.imgsz,
         batch=args.batch,
         device=args.device,
+        # Skip the AMP self-check.  It downloads the newest nano model
+        # (e.g. yolo26n.pt) EVERY run regardless of --model just to test mixed
+        # precision.  AMP still works; we just avoid the pointless download.
+        amp=False,
         project=os.path.join(HERE, "runs"),
         name="mob_detector",
         exist_ok=True,

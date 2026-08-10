@@ -21,6 +21,11 @@ media/
 
 # Auto-generated absolute-path copy of data.yaml (train.py writes this).
 ml/data.abs.yaml
+# Cached base YOLO weights + training runs (large, regenerable).
+ml/weights/
+ml/runs/
+# Stray base weights downloaded to cwd by ultralytics.
+yolo*.pt
 
 # Generated YOLO dataset (synthetic images/labels) — do not commit.
 # Keep the empty dir structure via the .gitkeep files below.

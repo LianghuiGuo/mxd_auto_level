@@ -158,6 +158,9 @@ monster_detect:
                                #    matching automatically if the model/ultralytics is unavailable.
   yolo_model_path: "models/mob_yolo.pt"  # 🤖 Path to the trained YOLO weights (used when mode=="yolo").
   yolo_conf_thres: 0.4         # 🎯 YOLO confidence threshold [0..1]; higher = stricter (fewer boxes).
+  yolo_player_offset_y: 0      # 🧍 Vertical pixel offset applied to the YOLO 'player' box CENTER to get
+                               #    loc_player (used when mode=="yolo"). Negative = aim higher (torso/head),
+                               #    positive = lower (feet). Tune if navigation/attack aim feels off.
   diff_thres: 0.15             # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match.
                                #    ⚠️ TM_SQDIFF_NORMED: real monsters score ≈0.  Measured on this client:
                                #    at 0.30 the mushroom template alone produced ~19k background false
