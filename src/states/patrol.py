@@ -10,6 +10,106 @@ class PatrolState(State):
         self.is_patrol_to_left = True # Patrol direction flag
         self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
 
+        # --- auto-jump-when-stuck bookkeeping ---
+        # We detect "pushing a walk direction but not actually advancing" by
+        # sampling a reference position at the moment we START walking a given
+        # direction and checking how far it has moved after jump_stuck_sec.
+        self._jump_ref_pos = None       # reference position (minimap dot or screen x tuple)
+        self._jump_ref_time = 0.0       # when the reference was taken
+        self._jump_ref_dir = None       # which walk direction the reference belongs to
+        self._jump_last_time = 0.0      # last time we issued an auto-jump (cooldown)
+
+    def _current_progress_pos(self):
+        '''
+        Return a scalar-ish reference for "how far along the route" the player
+        is, preferring the minimap dot (absolute map coords, unaffected by the
+        camera following the character) and falling back to the on-screen x.
+
+        Returns a tuple (kind, value) where kind is "mm" or "screen" so we only
+        compare like-with-like (their pixel scales differ a lot).
+        '''
+        mm = getattr(self.bot, "loc_player_minimap", None)
+        if mm is not None and mm != (0, 0):
+            return ("mm", (float(mm[0]), float(mm[1])))
+        # fallback: on-screen x (camera-follow makes this less reliable but it's
+        # better than nothing when the minimap dot isn't found).
+        lp = getattr(self.bot, "loc_player", None) or (0, 0)
+        return ("screen", (float(lp[0]), float(lp[1])))
+
+    def _maybe_auto_jump(self, walk_dir):
+        '''
+        Decide whether the character is blocked by terrain while walking
+        ``walk_dir`` and, if so, set cmd_action="jump".  Returns True when a
+        jump was issued this frame.
+
+        Trigger: the player keeps pushing the SAME direction but its real
+        position (minimap dot when available, else screen x) moved less than
+        cfg.patrol.jump_stuck_dist over cfg.patrol.jump_stuck_sec.
+        '''
+        cfg = self.bot.cfg["patrol"]
+        if not cfg.get("jump_enable", True):
+            return False
+        if walk_dir not in ("left", "right"):
+            return False
+
+        now = time.time()
+        kind, pos = self._current_progress_pos()
+
+        # Reset the reference whenever the walk direction changed or we don't
+        # have one yet — we only measure progress within a single direction.
+        if self._jump_ref_dir != walk_dir or self._jump_ref_pos is None:
+            self._jump_ref_dir = walk_dir
+            self._jump_ref_pos = (kind, pos)
+            self._jump_ref_time = now
+            return False
+
+        ref_kind, ref_pos = self._jump_ref_pos
+        # If the position source changed (minimap dot appeared/disappeared),
+        # re-baseline instead of comparing incomparable scales.
+        if ref_kind != kind:
+            self._jump_ref_pos = (kind, pos)
+            self._jump_ref_time = now
+            return False
+
+        moved = abs(pos[0] - ref_pos[0]) + abs(pos[1] - ref_pos[1])
+        # Minimap dots move only a few px per step, but the on-screen x can jump
+        # tens of px as the character walks, so use a larger "not moving"
+        # threshold for the screen fallback to avoid false auto-jumps while the
+        # character is actually walking fine.
+        stuck_dist = float(cfg.get("jump_stuck_dist", 3))
+        if kind == "screen":
+            stuck_dist = float(cfg.get("jump_stuck_dist_screen", 12))
+
+        # Real progress -> re-baseline and don't jump.
+        if moved > stuck_dist:
+            self._jump_ref_pos = (kind, pos)
+            self._jump_ref_time = now
+            return False
+
+        # Not moving yet, but hasn't been long enough — keep waiting.
+        if now - self._jump_ref_time < float(cfg.get("jump_stuck_sec", 0.8)):
+            return False
+
+        # Blocked long enough: jump (respecting cooldown).
+        if now - self._jump_last_time < float(cfg.get("jump_cooldown", 0.7)):
+            return False
+
+        self.bot.cmd_action = "jump"
+        self._jump_last_time = now
+        # Re-baseline so we measure a fresh window after the hop.
+        self._jump_ref_pos = (kind, pos)
+        self._jump_ref_time = now
+        try:
+            from src.utils.logger import logger
+            logger.info(
+                f"[Patrol] auto-jump: blocked walking {walk_dir} "
+                f"(moved={moved:.1f} <= {stuck_dist} over "
+                f"{cfg.get('jump_stuck_sec', 0.8)}s, src={kind})."
+            )
+        except Exception:
+            pass
+        return True
+
     def on_enter(self):
         pass
 
@@ -85,9 +185,19 @@ class PatrolState(State):
         if not getattr(self.bot, "_has_attackable_target", False):
             self.bot.cmd_move_x = patrol_dir
 
+        # Auto-jump over terrain: if we're walking (no monster to attack) but
+        # the character isn't actually advancing, hop to get over the step /
+        # ledge blocking the route.  Runs only while patrol-walking so it never
+        # clobbers an attack.
+        jumped = False
+        if not getattr(self.bot, "_has_attackable_target", False):
+            jumped = self._maybe_auto_jump(self.bot.cmd_move_x)
+
         # If player stuck for too long, perform a random command — but never
-        # override a real attack we just decided on from mob detection.
-        if not getattr(self.bot, "_has_attackable_target", False) \
+        # override a real attack we just decided on from mob detection, and not
+        # in the same frame we already issued an auto-jump.
+        if not jumped \
+                and not getattr(self.bot, "_has_attackable_target", False) \
                 and self.bot.is_player_stuck():
             self.bot.update_cmd_by_random()
 
