@@ -1369,6 +1369,25 @@ class MapleStoryAutoBot:
             proj_gy = max(0, min(max(0, tgt_h - 1), proj_gy))
             self.loc_minimap_global = (0, 0)
             self._minimap_global_synth = True
+            # Periodic (every 3s) diagnostic — this is the exact fallback that
+            # makes the yellow dot drift to the bottom of the minimap.  We log
+            # the score, the img_minimap vs img_map/img_route sizes and the
+            # projected point so a drift episode is fully explained.
+            _now = time.time()
+            if _now - getattr(self, "_mm_global_synth_t", 0.0) >= 3.0:
+                self._mm_global_synth_t = _now
+                mm_wh = (self.img_minimap.shape[1], self.img_minimap.shape[0]) \
+                    if self.img_minimap is not None else None
+                map_wh = (self.img_map.shape[1], self.img_map.shape[0]) \
+                    if self.img_map is not None else None
+                logger.warning(
+                    "[minimap-drift] WEAK minimap->map match "
+                    f"score={round(score, 3)} (>=0.4) -> screen->route "
+                    f"projection. minimap_wh={mm_wh} map_wh={map_wh} "
+                    f"route_wh=({tgt_w},{tgt_h}) player_screen="
+                    f"{self.loc_player} projected=({proj_gx},{proj_gy}). "
+                    "If route_h >> minimap_h the dot will render outside the "
+                    "minimap box.")
             if not getattr(self, "_mm_global_synth_warned", False):
                 self._mm_global_synth_warned = True
                 logger.warning(
@@ -3714,6 +3733,30 @@ class MapleStoryAutoBot:
                                 minimap_player_color=self.cfg["minimap"]["player_color"])
         if loc_player_minimap:
             self.loc_player_minimap = loc_player_minimap
+
+        # --- Drift diagnostic: watch the minimap yellow-dot health -----------
+        # The "player yellow dot floats to the bottom of the minimap after a
+        # while" symptom is driven by the minimap dot detection intermittently
+        # FAILING (returns None) mid-run, which then forces the screen->route
+        # projection fallback (see get_player_location_on_global_map).  Log the
+        # dot state periodically (every 3s) plus whenever it flips found<->lost
+        # so we can catch exactly when/why it degrades.
+        try:
+            _mm = self.img_minimap
+            _mm_wh = (_mm.shape[1], _mm.shape[0]) if _mm is not None else None
+            _now = time.time()
+            _found = loc_player_minimap is not None
+            _prev = getattr(self, "_mm_dot_prev_found", None)
+            if _found != _prev or _now - getattr(self, "_mm_dot_diag_t", 0.0) >= 3.0:
+                self._mm_dot_diag_t = _now
+                self._mm_dot_prev_found = _found
+                logger.info(
+                    f"[minimap-dot] found={_found} dot={loc_player_minimap} "
+                    f"minimap_wh={_mm_wh} player_color="
+                    f"{self.cfg['minimap']['player_color']} "
+                    f"last_good_dot={self.loc_player_minimap}")
+        except Exception:
+            pass
 
         # Also refresh "other players on minimap" dot list (used later by
         # channel-change and PvP logic).
