@@ -98,6 +98,7 @@ class MapleStoryAutoBot:
         self.loc_player = (0, 0) # player location on game screen
         self.loc_player_minimap = (0, 0) # player location on minimap
         self.loc_minimap_global = (0, 0) # minimap location on global map
+        self._last_good_minimap_global = None # last strong-match minimap anchor
         self.loc_player_global = (0, 0) # player location on global map
         self.loc_watch_dog = (0, 0) # watch dog location on global map
         # Images
@@ -1336,6 +1337,32 @@ class MapleStoryAutoBot:
             # clients where the minimap renders with sharp white borders and
             # the route-map was captured from the same build.
             self.loc_minimap_global = match_loc
+            # Remember the last GOOD minimap anchor so that if the match later
+            # degrades mid-run (score creeps >=0.4 in a texture-poor region) we
+            # can still combine it with the (usually still-valid) yellow dot
+            # instead of collapsing to the inaccurate screen->route projection
+            # that drifts the dot to the bottom of the minimap.
+            self._last_good_minimap_global = match_loc
+            self._minimap_global_synth = False
+        elif getattr(self, "_last_good_minimap_global", None) is not None and \
+                self.loc_player_minimap not in (None, (0, 0)):
+            # Weak match THIS frame, but we (a) still have a trustworthy minimap
+            # anchor from a recent strong match, and (b) the yellow player dot
+            # is still being detected.  This is the common "texture-poor patch"
+            # case (score creeps >=0.4 for a few seconds).  Re-using the last
+            # good anchor + the accurate yellow dot keeps loc_player_global
+            # precise, instead of collapsing to the screen->route projection
+            # that visibly drifts the dot to the bottom of the minimap.
+            self.loc_minimap_global = self._last_good_minimap_global
+            self._minimap_global_synth = False
+            _now = time.time()
+            if _now - getattr(self, "_mm_hold_anchor_t", 0.0) >= 3.0:
+                self._mm_hold_anchor_t = _now
+                logger.info(
+                    "[minimap-drift] weak match "
+                    f"score={round(score, 3)} (>=0.4) but yellow dot ok "
+                    f"({self.loc_player_minimap}); holding last good anchor "
+                    f"{self._last_good_minimap_global} instead of projecting.")
         else:
             # Weak or garbage match.  Don't poison loc_player_global with a
             # random (0,0) anchor.  Synthesise a guess by linearly mapping
