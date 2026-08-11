@@ -108,7 +108,13 @@ health_monitor:
   #    Order MUST be HP, MP, EXP.  Set to null to use auto-detection.
   #    Tip: set health_monitor.debug_dump: true, run once, then read the
   #    printed suggestion / log/health_bottom_bar.png to measure exact values.
-  manual_bars: null
+  #    Measured on game_gangkou.png (1296x700 engine frame): the bottom status
+  #    bars sit at full-frame y≈682-691; HealthMonitor receives img_frame[610:]
+  #    so y here = full_frame_y - 610 = 72.  HP/MP/EXP each ~100px wide.
+  manual_bars:
+    - [478, 72, 99, 10]    # HP  (red)
+    - [580, 72, 100, 10]   # MP  (blue)
+    - [688, 72, 108, 10]   # EXP (yellow)
   # 🐞 Dump the engine's bottom status-bar strip to log/health_bottom_bar.png so
   #    you can measure the exact manual_bars ROIs in ENGINE coordinates.
   debug_dump: false
