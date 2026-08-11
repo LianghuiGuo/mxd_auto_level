@@ -259,27 +259,36 @@ class HealthMonitor:
         gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
         Hs, Ws = gray.shape[:2]
 
-        def _expand_to_white(blob):
+        def _expand_to_white(blob, max_total_w):
+            '''Expand a filled-colour blob left/right to the bar's white end
+            caps so get_bar_percent sees the whole slot.  Bounded by
+            ``max_total_w`` so that on clients WITHOUT bright white caps we
+            don't run away across the entire strip (that produced a 1296-wide
+            HP ROI that crashed the debug canvas and dirtied the fill ratio).'''
             if blob is None:
                 return None
             x, y, w, h = blob
             cy = min(max(y + h // 2, 0), Hs - 1)
             row = gray[cy]
-            # walk left from blob start until white cap (or strip edge)
             xl = x
-            while xl > 0 and row[xl - 1] < 240:
+            while xl > 0 and row[xl - 1] < 240 and (x + w) - xl < max_total_w:
                 xl -= 1
             xr = x + w - 1
-            while xr < Ws - 1 and row[xr + 1] < 240:
+            while xr < Ws - 1 and row[xr + 1] < 240 and xr - xl + 1 < max_total_w:
                 xr += 1
             nw = xr - xl + 1
             if nw < w:              # expansion failed, keep original
                 xl, nw = x, w
             return (int(xl), int(y), int(nw), int(h))
 
-        hp = _expand_to_white(_largest_bar(red_m))
-        mp = _expand_to_white(_largest_bar(blue_m))
-        ex = _expand_to_white(_largest_bar(yel_m))
+        # A MapleStory status bar is short; cap expansion so we never bleed
+        # across into the next bar / chat box (which is what produced the
+        # 1296-wide runaway ROI).  ~12% of strip width is comfortably wider
+        # than one bar but far short of two.
+        max_bar_w = max(60, int(Ws * 0.12))
+        hp = _expand_to_white(_largest_bar(red_m), max_bar_w)
+        mp = _expand_to_white(_largest_bar(blue_m), max_bar_w)
+        ex = _expand_to_white(_largest_bar(yel_m), max_bar_w)
 
         # HP and MP are the critical ones (drive healing). EXP is optional; if
         # missing, synthesise a placeholder so downstream indexing is safe.
