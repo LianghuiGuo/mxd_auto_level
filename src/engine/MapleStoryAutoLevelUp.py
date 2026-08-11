@@ -2505,11 +2505,20 @@ class MapleStoryAutoBot:
                         f"{bar_name}: {percent_bars[i]:.1f}%",
                         (x_s, y_s + 30*i),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-            # Draw bar on debug window
+            # Draw bar on debug window (clamped so an over-wide/tall bar ROI
+            # can never broadcast-crash into the fixed debug canvas slot).
             x_s, y_s = (410, 13)
             x, y, w, h = self.health_monitor.loc_size_bars[i]
-            self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
-                self.img_frame[self.cfg["ui_coords"]["ui_y_start"]:, :][y:y+h, x:x+w]
+            strip = self.img_frame[self.cfg["ui_coords"]["ui_y_start"]:, :]
+            sh, sw = strip.shape[:2]
+            dh, dw = self.img_frame_debug.shape[:2]
+            dy = y_s + 30 * i
+            # available room in both source strip and destination canvas
+            avail_h = min(h, sh - y, dh - dy)
+            avail_w = min(w, sw - x, dw - x_s)
+            if avail_h > 0 and avail_w > 0:
+                self.img_frame_debug[dy:dy+avail_h, x_s:x_s+avail_w] = \
+                    strip[y:y+avail_h, x:x+avail_w]
 
         # ================================================================
         # Debug viz overlay — MOB DETECTION SUMMARY (always drawn).
