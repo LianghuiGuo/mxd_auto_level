@@ -100,6 +100,18 @@ health_monitor:
   fps_limit: 20            # 🚥 Loop rate for the health monitor thread
   return_home_if_no_potion: False      # ✅ Use homing scroll when potion is used up
   return_home_watch_dog_timeout: 3     # 🕒 Duration to detect HP is lower than "add_hp_percent"
+  # 📐 Manual HP/MP/EXP bar ROIs in the ENGINE frame coordinate system
+  #    (frame is 1296x700 for 冒险岛怀旧服, NOT your OS screenshot resolution).
+  #    The auto contour finder can lock onto the wrong (white) UI element and
+  #    peg HP at a constant value -> either endless healing or never healing.
+  #    Fill these three [x, y, w, h] rectangles to skip auto-detection entirely.
+  #    Order MUST be HP, MP, EXP.  Set to null to use auto-detection.
+  #    Tip: set health_monitor.debug_dump: true, run once, then read the
+  #    printed suggestion / log/health_bottom_bar.png to measure exact values.
+  manual_bars: null
+  # 🐞 Dump the engine's bottom status-bar strip to log/health_bottom_bar.png so
+  #    you can measure the exact manual_bars ROIs in ENGINE coordinates.
+  debug_dump: false
 
 teleport:
   # 🌀 Mage Teleport
