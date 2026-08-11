@@ -63,6 +63,18 @@ class HealthMonitor:
         self._bars_locked = None          # list[(x,y,w,h)] once locked
         self._lock_fail_streak = 0        # consecutive locked-read failures
 
+        # Manual bar ROIs (highest priority). If provided, we skip auto-detect
+        # entirely and always read these fixed rectangles -> fully stable.
+        self._bars_manual = False
+        mb = self.cfg["health_monitor"].get("manual_bars")
+        if mb and len(mb) == 3:
+            self._bars_locked = [tuple(int(v) for v in r) for r in mb]
+            self._bars_manual = True
+            logger.info(
+                f"[Health Monitor] Using manual bar ROIs: {self._bars_locked}")
+        self._debug_dump = bool(self.cfg["health_monitor"].get("debug_dump", False))
+        self._dbg_dump_done = False
+
         logger.info("[Health Monitor] Init done")
 
     def start(self):
@@ -138,122 +150,144 @@ class HealthMonitor:
                 percents.append(get_bar_percent(img_frame[y:y+h, x:x+w]))
             if ok:
                 return percents
-            # Geometry no longer fits the frame (resolution changed) -> unlock.
+            # Geometry no longer fits the frame.
+            if self._bars_manual:
+                logger.warning(
+                    "[Health Monitor] manual_bars ROI is outside the frame "
+                    f"{(Wf, Hf)}; fix health_monitor.manual_bars.")
+                return (None, None, None)
             logger.warning(
                 "[Health Monitor] Locked bar ROI no longer fits the frame "
                 "(resolution changed?); re-detecting bars.")
             self._bars_locked = None
             return (None, None, None)
 
-        img_frame_gray = cv2.cvtColor(img_frame, cv2.COLOR_BGR2GRAY)
-        white_mask = cv2.inRange(img_frame_gray, 240, 255)
-        # cv2.imshow("white_mask", white_mask)
+        # --- Debug: dump the bottom status-bar strip for manual measuring ----
+        # NOTE: img_frame here is ALREADY the bottom UI strip (img_frame[ui_y_start:]),
+        # so manual_bars coordinates are relative to THIS strip (x from 0, y from 0),
+        # NOT the full client frame.
+        if self._debug_dump and not self._dbg_dump_done:
+            try:
+                import os
+                Hf, Wf = img_frame.shape[:2]
+                os.makedirs("log", exist_ok=True)
+                path = os.path.join("log", "health_bottom_bar.png")
+                cv2.imwrite(path, img_frame)
+                self._dbg_dump_done = True
+                logger.info(
+                    f"[Health Monitor] debug_dump: wrote {path} "
+                    f"(this IS the bottom UI strip, size={(Wf, Hf)}). "
+                    "Measure HP/MP/EXP bars in THIS image; coordinates are "
+                    "already in the correct system. Put three [x,y,w,h] into "
+                    "health_monitor.manual_bars (order HP, MP, EXP).")
+            except Exception as e:
+                logger.warning(f"[Health Monitor] debug_dump failed: {e}")
 
-        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # NOTE: the caller (MapleStoryAutoLevelUp.run_once) already crops the
-        # frame to the bottom UI band (img_frame[ui_y_start:, :]) before
-        # calling update_frame(), so ``img_frame`` here is ALREADY just the
-        # short HP/MP/EXP strip (e.g. 1296x90), NOT the full client.  Earlier
-        # this filter assumed a full-height frame and demanded the bar sit in
-        # the bottom 80% / be < 6% of height — both wrong for a 90px strip, so
-        # nothing matched.  Here we only apply the SHAPE test (long & thin) and
-        # a width test relative to the strip width; we do NOT constrain y or an
-        # absolute height, because within the strip the bars can be anywhere
-        # and are a large fraction of the strip's height.
-        H_full, W_full = img_frame_gray.shape[:2]
-        min_w = int(W_full * 0.03)           # each bar spans a few % of width
-        max_w = int(W_full * 0.45)
-        min_h = 2
-        max_h = H_full                        # strip is short; don't cap height
-
-        loc_size_bars = []
-        cand_dbg = []
-        for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            if h <= 0:
-                continue
-            ar = w / float(h)
-            # long-and-thin AND width within the relative range
-            if (3.0 < ar < 30.0 and
-                    min_w <= w <= max_w and
-                    min_h <= h <= max_h):
-                loc_size_bars.append((x, y, w, h))
-                cand_dbg.append((x, y, w, h, round(ar, 1)))
-
-        # sort contours by x coordinate
-        loc_size_bars = sorted(loc_size_bars, key=lambda bar: bar[0])
-
-        # One-shot diagnostic so the user can see WHY bars were / weren't
-        # found (prints the candidate rectangles the shape filter accepted).
-        try:
-            cls = type(self)
-            if not getattr(cls, "_bar_dbg_done", False) or \
-                    len(loc_size_bars) != 3:
-                now = time.time()
-                if now - getattr(cls, "_bar_dbg_t", 0.0) >= 3.0:
-                    cls._bar_dbg_t = now
-                    cls._bar_dbg_done = True
-                    logger.info(
-                        f"[Health Monitor] bar-detect: frame_wh="
-                        f"{(W_full, H_full)} bottom_band_y>={y_bottom_band} "
-                        f"w:[{min_w},{max_w}] h:[{min_h},{max_h}] "
-                        f"found={len(loc_size_bars)} candidates={cand_dbg}"
-                    )
-        except Exception:
-            pass
-
-        if len(loc_size_bars) != 3:
-            return (None, None, None)
-
-        # Identity check on the HP bar (the left-most of the three).  The
-        # contour finder can occasionally lock onto a NON-HP white-bordered UI
-        # element (damage numbers, quest/notice popups, buff bars, …) that
-        # sneaks into the 3-bar set.  Such a fake "HP bar" is mostly grey/white
-        # inside, so get_bar_percent reports a constant low value (observed:
-        # HP stuck at 15.9%), and the bot then drinks potions forever on full
-        # HP.  A REAL HP bar's filled portion is red (R clearly > G and > B).
-        # If the left-most bar has almost no red fill, treat this frame's read
-        # as invalid (return None) so the monitor keeps its last good value and
-        # does NOT heal.
-        hp_x, hp_y, hp_w, hp_h = loc_size_bars[0]
-        hp_img = img_frame[hp_y:hp_y + hp_h, hp_x:hp_x + hp_w]
-        if not self._looks_like_hp_bar(hp_img):
-            # Left-most "bar" isn't a red HP bar -> this detection is untrusted
-            # (transient white UI mistaken for a bar).  Don't lock and don't
-            # heal off it; keep trying on later frames until a clean red HP bar
-            # shows up so we can lock onto the REAL bars.
+        # --- Colour-based bar localisation -----------------------------------
+        # The old white-border contour finder was unreliable on this client:
+        # the wide white chat box / status panel produced fat white blobs that
+        # got mistaken for the HP bar (observed roi=(269,29,542,20), all-white
+        # sample -> red_ratio 0.000 -> never heals).  MapleStory's three status
+        # bars are RED (HP), BLUE (MP) and a YELLOW/ORANGE (EXP) strip.  We find
+        # them directly by colour: this cannot be fooled by white UI.
+        bars = self._detect_bars_by_colour(img_frame)
+        if bars is None:
             cls = type(self)
             now = time.time()
-            if now - getattr(cls, "_hp_fake_t", 0.0) >= 3.0:
-                cls._hp_fake_t = now
-                # Report the actual red fraction + a sample colour so the
-                # threshold can be tuned to this client if needed.
-                bb = hp_img[:, :, 0].astype(np.int16)
-                gg = hp_img[:, :, 1].astype(np.int16)
-                rr = hp_img[:, :, 2].astype(np.int16)
-                red = (rr > 90) & (rr - gg > 30) & (rr - bb > 30)
-                mid = hp_img[hp_img.shape[0] // 2] if hp_img.size else []
+            if now - getattr(cls, "_bar_dbg_t", 0.0) >= 3.0:
+                cls._bar_dbg_t = now
+                Hs, Ws = img_frame.shape[:2]
                 logger.warning(
-                    "[Health Monitor] Candidate HP bar has no red fill "
-                    f"(red_ratio={float(red.mean()) if hp_img.size else 0:.3f}, "
-                    f"roi=({hp_x},{hp_y},{hp_w},{hp_h}), "
-                    f"mid_row_sample_BGR={[list(map(int,p)) for p in mid[:6]]}). "
-                    "Waiting for a clean detection before locking bar ROIs.")
+                    f"[Health Monitor] Could not locate HP/MP/EXP bars by "
+                    f"colour in bottom strip (size={(Ws, Hs)}). "
+                    "Enable health_monitor.debug_dump to measure manual_bars.")
             return (None, None, None)
 
-        # Trustworthy detection: LOCK these ROIs for the rest of the session so
-        # transient UI can never hijack the reading again.
-        self._bars_locked = list(loc_size_bars)
-        self.loc_size_bars = loc_size_bars
-        logger.info(
-            f"[Health Monitor] Locked bar ROIs (HP/MP/EXP): {loc_size_bars}")
+        # Lock the HP/MP/EXP ROIs for the rest of the session.
+        self._bars_locked = list(bars)
+        self.loc_size_bars = list(bars)
+        logger.info(f"[Health Monitor] Locked bar ROIs (HP/MP/EXP): {bars}")
 
-        # Get bar filled ratio
         percent_bars = []
-        for x, y, w, h in loc_size_bars:
+        for x, y, w, h in bars:
             percent_bars.append(get_bar_percent(img_frame[y:y+h, x:x+w]))
         return percent_bars
+
+    @staticmethod
+    def _detect_bars_by_colour(strip):
+        '''
+        Locate the HP (red), MP (blue) and EXP (yellow) bars inside the bottom
+        UI strip purely by colour, then return their [x,y,w,h] ROIs ordered
+        HP, MP, EXP.  Returns None if all three could not be found confidently.
+
+        This is robust against the white chat box / panels that fooled the old
+        white-contour finder.
+        '''
+        import numpy as _np
+        b = strip[:, :, 0].astype(_np.int16)
+        g = strip[:, :, 1].astype(_np.int16)
+        r = strip[:, :, 2].astype(_np.int16)
+
+        red_m  = ((r > 90) & (r - g > 40) & (r - b > 40)).astype(_np.uint8)
+        blue_m = ((b > 90) & (b - g > 30) & (b - r > 40)).astype(_np.uint8)
+        # EXP bar is a thin yellow/orange strip: high R & G, low B.
+        yel_m  = ((r > 120) & (g > 100) & (b < 100) & (r - b > 40)).astype(_np.uint8)
+
+        def _largest_bar(mask):
+            # Close small gaps horizontally so a partially-filled bar stays one
+            # blob, then take the widest long-thin component.
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 1))
+            m = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+            n, _, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+            best = None
+            for i in range(1, n):
+                x, y, w, h, area = stats[i]
+                if w < 8 or h < 1:
+                    continue
+                ar = w / float(h)
+                if ar < 2.0:            # bars are wide & short
+                    continue
+                if best is None or w > best[2]:
+                    best = (int(x), int(y), int(w), int(h))
+            return best
+
+        # A coloured blob marks only the FILLED part of a bar.  get_bar_percent
+        # needs the WHOLE bar (filled + empty grey slot, bounded by the white
+        # end-caps) to compute a fill ratio.  So from the filled blob we expand
+        # left/right along the blob's centre row until we hit the white border,
+        # yielding the full bar ROI.
+        gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        Hs, Ws = gray.shape[:2]
+
+        def _expand_to_white(blob):
+            if blob is None:
+                return None
+            x, y, w, h = blob
+            cy = min(max(y + h // 2, 0), Hs - 1)
+            row = gray[cy]
+            # walk left from blob start until white cap (or strip edge)
+            xl = x
+            while xl > 0 and row[xl - 1] < 240:
+                xl -= 1
+            xr = x + w - 1
+            while xr < Ws - 1 and row[xr + 1] < 240:
+                xr += 1
+            nw = xr - xl + 1
+            if nw < w:              # expansion failed, keep original
+                xl, nw = x, w
+            return (int(xl), int(y), int(nw), int(h))
+
+        hp = _expand_to_white(_largest_bar(red_m))
+        mp = _expand_to_white(_largest_bar(blue_m))
+        ex = _expand_to_white(_largest_bar(yel_m))
+
+        # HP and MP are the critical ones (drive healing). EXP is optional; if
+        # missing, synthesise a placeholder so downstream indexing is safe.
+        if hp is None or mp is None:
+            return None
+        if ex is None:
+            ex = (mp[0], mp[1], mp[2], mp[3])
+        return [hp, mp, ex]
 
     @staticmethod
     def _looks_like_hp_bar(bar_img, min_red_ratio=0.02):
