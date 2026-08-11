@@ -40,6 +40,16 @@ def is_mac():
 def is_windows():
     return OS_NAME == 'Windows'
 
+# Backwards-compat: older config/.config_tmp.yaml files (written before
+# save_yaml was hardened) may still contain "!!python/tuple" tags produced by a
+# plain yaml.dump of a tuple.  yaml.safe_load rejects those tags and crashes
+# start_bot.  Teach the SafeLoader to read a python/tuple as a plain list so we
+# never break on a stale/legacy temp config.
+def _construct_python_tuple(loader, node):
+    return list(loader.construct_sequence(node))
+yaml.SafeLoader.add_constructor(
+    'tag:yaml.org,2002:python/tuple', _construct_python_tuple)
+
 def load_yaml(path):
     with open(path, 'r', encoding='utf-8') as f:
         logger.info(f"Load yaml: {path}")
@@ -73,7 +83,13 @@ def load_yaml_with_comments(path):
 def save_yaml(data, path):
     data = convert_tuples_to_lists(data)
     with open(path, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, default_flow_style=False)
+        # safe_dump refuses to emit python-specific tags (e.g. !!python/tuple),
+        # so combined with convert_tuples_to_lists above it guarantees the file
+        # is loadable by yaml.safe_load (used in load_yaml).  Plain yaml.dump
+        # would silently serialise any stray tuple as !!python/tuple, which
+        # then crashes safe_load on the next start_bot.
+        yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True,
+                       sort_keys=False)
     logger.info(f"Save yaml: {path}")
 
 def get_cfg_diff(base, current):
