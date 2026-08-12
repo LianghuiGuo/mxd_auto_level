@@ -3062,6 +3062,15 @@ class MapleStoryAutoBot:
         if self.cfg["key"]["teleport"] == "" and self.cmd_action == "teleport":
             self.cmd_action = "jump"
 
+        # Remember the route's INTENDED move direction + whether this is a jump
+        # waypoint.  The stuck-watchdog's random rescue (update_cmd_by_random)
+        # otherwise overwrites the direction with a random one; on a "right +
+        # jump" ledge (colour 0,255,255) it would jump LEFT and never clear the
+        # ledge, getting MORE stuck.  hunting.on_frame uses this to keep hopping
+        # in the route direction instead.
+        self._route_move_x = self.cmd_move_x
+        self._route_is_jump = (self.cmd_action == "jump")
+
         # ------------------------------------------------------------------
         # Rate-limited (every 3 s) diagnostic dump so the user can confirm
         # that the route-tracker is actually producing *something* even when
