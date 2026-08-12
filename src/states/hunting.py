@@ -74,16 +74,25 @@ class HuntingState(State):
         # attacks").
         if not getattr(self.bot, "_has_attackable_target", False) \
                 and self.bot.is_player_stuck():
-            self.bot.update_cmd_by_random()
-            # update_cmd_by_random may set cmd_move_y="down" and cmd_action=
-            # "none".  When stuck on a jump waypoint (route colour code
-            # (0,255,255) "right + jump"), holding DOWN makes the character
-            # crouch, which SUPPRESSES the jump key — so it can never hop over
-            # the ledge and stays pinned forever (loc_player frozen, jumping
-            # every frame with zero movement).  Force a clean hop instead: no
-            # down, always jump.
-            self.bot.cmd_move_y = "none"
-            self.bot.cmd_action = "jump"
+            # On a JUMP waypoint (route colour code e.g. (0,255,255) "right +
+            # jump") the character must hop IN THE ROUTE DIRECTION to clear the
+            # ledge.  The generic random rescue picks a RANDOM direction — on a
+            # "right + jump" ledge it would jump LEFT and never get across,
+            # making the stuck worse (observed: reversed-direction hopping in
+            # place).  So when the route wants a directional jump, preserve that
+            # direction and just force a clean hop; only fall back to the random
+            # rescue for non-jump waypoints.
+            if getattr(self.bot, "_route_is_jump", False):
+                self.bot.cmd_move_x = getattr(self.bot, "_route_move_x", self.bot.cmd_move_x)
+                self.bot.cmd_move_y = "none"
+                self.bot.cmd_action = "jump"
+            else:
+                self.bot.update_cmd_by_random()
+                # update_cmd_by_random may set cmd_move_y="down" and cmd_action=
+                # "none"; holding DOWN crouches and SUPPRESSES the jump key, so
+                # force a clean hop (no down, always jump).
+                self.bot.cmd_move_y = "none"
+                self.bot.cmd_action = "jump"
 
         # send command to keyboard controller
         self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \
