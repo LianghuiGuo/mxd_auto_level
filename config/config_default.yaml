@@ -270,7 +270,10 @@ chair_rest:
   enabled: false              # ✅ Enable resting after a configured number of rounds.
   rounds_before_rest: 10      # 🔁 Completed full route rounds before each rest; must be > 0.
   duration_minutes: 5.0       # ⏱️ Chair-rest duration in minutes; must be > 0.
-  key: "c"                    # ⌨️ In-game chair key. Pressed exactly once when rest starts.
+  key: "c"                    # ⌨️ In-game chair key.
+  settle_seconds: 1.0         # 🛑 Wait after all controls stop before trying to sit.
+  sit_retry_count: 3          # 🪑 C only sits (does not stand), so retry safely if the game ignores it.
+  sit_retry_interval: 0.5     # ⏱️ Seconds between chair-key attempts.
 
 watchdog:
   # 🐶 Watchdog

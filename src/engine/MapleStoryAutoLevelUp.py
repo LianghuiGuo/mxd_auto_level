@@ -263,25 +263,38 @@ class MapleStoryAutoBot:
         rest_cfg.setdefault("rounds_before_rest", 10)
         rest_cfg.setdefault("duration_minutes", 5.0)
         rest_cfg.setdefault("key", "c")
+        rest_cfg.setdefault("settle_seconds", 1.0)
+        rest_cfg.setdefault("sit_retry_count", 3)
+        rest_cfg.setdefault("sit_retry_interval", 0.5)
         if rest_cfg["enabled"]:
             try:
                 rounds_before_rest = int(rest_cfg["rounds_before_rest"])
                 duration_minutes = float(rest_cfg["duration_minutes"])
                 chair_key = str(rest_cfg["key"] or "").strip()
+                settle_seconds = float(rest_cfg["settle_seconds"])
+                sit_retry_count = int(rest_cfg["sit_retry_count"])
+                sit_retry_interval = float(rest_cfg["sit_retry_interval"])
             except (TypeError, ValueError):
                 logger.error(
                     "[Chair Rest] Invalid configuration: rounds_before_rest "
-                    "must be an integer and duration_minutes must be numeric."
+                    "and sit_retry_count must be integers; duration_minutes, "
+                    "settle_seconds and sit_retry_interval must be numeric."
                 )
                 return -1
-            if rounds_before_rest <= 0 or duration_minutes <= 0 or not chair_key:
+            if rounds_before_rest <= 0 or duration_minutes <= 0 or not chair_key \
+                    or settle_seconds < 0 or sit_retry_count <= 0 \
+                    or sit_retry_interval < 0:
                 logger.error(
-                    "[Chair Rest] Invalid configuration: rounds_before_rest, "
-                    "duration_minutes and key must all be positive/non-empty."
+                    "[Chair Rest] Invalid configuration: round/duration/retry "
+                    "count and key must be positive/non-empty; settle and "
+                    "retry interval cannot be negative."
                 )
                 return -1
             rest_cfg["rounds_before_rest"] = rounds_before_rest
             rest_cfg["duration_minutes"] = duration_minutes
+            rest_cfg["settle_seconds"] = settle_seconds
+            rest_cfg["sit_retry_count"] = sit_retry_count
+            rest_cfg["sit_retry_interval"] = sit_retry_interval
             if cfg["bot"]["mode"] != "normal":
                 logger.warning(
                     "[Chair Rest] enabled=true is ignored outside normal mode "
