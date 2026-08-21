@@ -263,6 +263,15 @@ route:
     "127,127,127": "none up none"       # ⚪ Gray
     "255,255,127": "none down none"     # 🟡 Light yellow
 
+chair_rest:
+  # 🪑 Periodic chair rest (normal mode only).
+  # One round means completing every route*.png once: the last route reaches
+  # its goal and wraps back to route1. F1 pause/restart resets the counter.
+  enabled: false              # ✅ Enable resting after a configured number of rounds.
+  rounds_before_rest: 10      # 🔁 Completed full route rounds before each rest; must be > 0.
+  duration_minutes: 5.0       # ⏱️ Chair-rest duration in minutes; must be > 0.
+  key: "c"                    # ⌨️ In-game chair key. Pressed exactly once when rest starts.
+
 watchdog:
   # 🐶 Watchdog
   # This feature monitors your character's movement.

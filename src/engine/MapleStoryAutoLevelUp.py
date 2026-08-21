@@ -43,6 +43,7 @@ from src.states.near_rune import NearRuneState
 from src.states.solving_rune import SolvingRuneState
 from src.states.auxiliary import AuxiliaryState
 from src.states.patrol import PatrolState
+from src.states.resting import RestingState
 
 class MapleStoryAutoBot:
     '''
@@ -116,6 +117,13 @@ class MapleStoryAutoBot:
         self.t_last_attack = time.time() # Last attack timer for cooldown
         self.t_last_minimap_update = time.time()
         self.t_to_change_channel = time.time()
+        # Periodic chair-rest state. These counters are reset in start(), so
+        # the current F1 pause/restart behaviour intentionally starts a fresh
+        # N-round batch.
+        self._chair_rest_rounds = 0
+        self._chair_rest_pending = False
+        self._chair_rest_until = 0.0
+        self._chair_rest_goal_latched = False
         # Images
         self.img_map = None
         self.img_routes = []
@@ -142,6 +150,7 @@ class MapleStoryAutoBot:
         self.fsm.add_state(SolvingRuneState("solving_rune", self))
         self.fsm.add_state(AuxiliaryState  ("aux"         , self))
         self.fsm.add_state(PatrolState     ("patrol"      , self))
+        self.fsm.add_state(RestingState    ("resting"     , self))
         self.fsm.add_transition("hunting", "finding_rune") # When saw a "Rune has created" messgae
         self.fsm.add_transition("finding_rune", "hunting") # After finding rune timeout
         self.fsm.add_transition("finding_rune", "near_rune") # When detect a nearby rune
@@ -149,6 +158,8 @@ class MapleStoryAutoBot:
         self.fsm.add_transition("near_rune", "finding_rune") # After rune solving timeout
         self.fsm.add_transition("near_rune", "solving_rune") # When enter the arrow minimap
         self.fsm.add_transition("solving_rune", "hunting") # After rune solving
+        self.fsm.add_transition("hunting", "resting") # Periodic chair rest
+        self.fsm.add_transition("resting", "hunting") # Rest duration elapsed
         self.fsm.set_init_state("hunting")
 
     def update_signals(self, image_debug_signal, route_map_viz_signal):
@@ -245,6 +256,38 @@ class MapleStoryAutoBot:
         '''
         load_config
         '''
+        # Backward-compatible defaults for custom YAML files created before
+        # periodic chair rest existed.
+        rest_cfg = cfg.setdefault("chair_rest", {})
+        rest_cfg.setdefault("enabled", False)
+        rest_cfg.setdefault("rounds_before_rest", 10)
+        rest_cfg.setdefault("duration_minutes", 5.0)
+        rest_cfg.setdefault("key", "c")
+        if rest_cfg["enabled"]:
+            try:
+                rounds_before_rest = int(rest_cfg["rounds_before_rest"])
+                duration_minutes = float(rest_cfg["duration_minutes"])
+                chair_key = str(rest_cfg["key"] or "").strip()
+            except (TypeError, ValueError):
+                logger.error(
+                    "[Chair Rest] Invalid configuration: rounds_before_rest "
+                    "must be an integer and duration_minutes must be numeric."
+                )
+                return -1
+            if rounds_before_rest <= 0 or duration_minutes <= 0 or not chair_key:
+                logger.error(
+                    "[Chair Rest] Invalid configuration: rounds_before_rest, "
+                    "duration_minutes and key must all be positive/non-empty."
+                )
+                return -1
+            rest_cfg["rounds_before_rest"] = rounds_before_rest
+            rest_cfg["duration_minutes"] = duration_minutes
+            if cfg["bot"]["mode"] != "normal":
+                logger.warning(
+                    "[Chair Rest] enabled=true is ignored outside normal mode "
+                    "because patrol/aux modes have no complete route round."
+                )
+
         # Parse color code in config
         self.color_code = {
             tuple(map(int, k.split(','))): v
@@ -366,6 +409,8 @@ class MapleStoryAutoBot:
         '''
         Start all threads
         '''
+        self.is_terminated = False
+
         # Start keyboard controller thread
         self.kb = KeyBoardController(self.cfg)
         if self.is_disable_control:
@@ -421,6 +466,13 @@ class MapleStoryAutoBot:
         self.t_last_attack = time.time()
         self.t_last_minimap_update = time.time()
         self.t_to_change_channel = time.time()
+
+        # F1 pause currently terminates the workers and the next F1 starts
+        # them again. That fresh start intentionally clears rest progress.
+        self._chair_rest_rounds = 0
+        self._chair_rest_pending = False
+        self._chair_rest_until = 0.0
+        self._chair_rest_goal_latched = False
 
         # Reset one-shot player-localisation flags so a Stop → Start cycle,
         # a map change (load_config re-run), or a route-index switch do not
@@ -3488,10 +3540,50 @@ class MapleStoryAutoBot:
             logger.warning(f"[minimap debug] dump failed: {e!r}")
 
     def check_reach_goal(self):
-        if self.cmd_action == "goal":
-            # Switch to next route map
-            self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
-            logger.debug(f"Change to new route:{self.idx_routes}")
+        is_goal = self.cmd_action == "goal"
+
+        # Goal colours normally remain under the detected player for several
+        # frames. Track the rising edge for ROUND COUNTING, otherwise one
+        # physical endpoint can count several rounds at once. Route switching
+        # itself deliberately keeps its legacy per-frame behaviour: some route
+        # sets place the same goal on adjacent route images and rely on quickly
+        # advancing through those zero-length hand-off segments.
+        if not is_goal:
+            self._chair_rest_goal_latched = False
+            return False
+        is_new_goal_contact = not self._chair_rest_goal_latched
+        self._chair_rest_goal_latched = True
+
+        if not self.img_routes:
+            logger.warning("[Route] Reached goal but no route images are loaded.")
+            return False
+
+        previous_route = self.idx_routes
+        self.idx_routes = (self.idx_routes + 1) % len(self.img_routes)
+        completed_round = self.idx_routes == 0
+        logger.debug(
+            f"Change to new route:{self.idx_routes} "
+            f"(previous={previous_route}, completed_round={completed_round})"
+        )
+
+        rest_cfg = self.cfg.get("chair_rest", {})
+        rest_enabled = bool(rest_cfg.get("enabled", False)) and \
+            self.cfg["bot"]["mode"] == "normal"
+        if completed_round and rest_enabled and is_new_goal_contact:
+            self._chair_rest_rounds += 1
+            target_rounds = int(rest_cfg.get("rounds_before_rest", 10))
+            logger.info(
+                f"[Chair Rest] Completed route round "
+                f"{self._chair_rest_rounds}/{target_rounds}."
+            )
+            if self._chair_rest_rounds >= target_rounds:
+                self._chair_rest_pending = True
+                logger.info(
+                    "[Chair Rest] Round target reached; rest will start "
+                    "after any active rune handling finishes."
+                )
+
+        return completed_round
 
     def run_once(self):
         '''
@@ -3883,10 +3975,12 @@ class MapleStoryAutoBot:
 
         self.profiler.mark("Player Location Detection")
 
+        is_chair_resting = getattr(self.fsm.state, "name", None) == "resting"
+
         ######################
         ### Change Channel ###
         ######################
-        if self.cfg['channel_change']['enable'] and \
+        if not is_chair_resting and self.cfg['channel_change']['enable'] and \
             self.is_need_change_channel(loc_other_players):
             self.kb.set_command("none none none")
             self.kb.release_all_key()
@@ -3896,7 +3990,7 @@ class MapleStoryAutoBot:
             self.red_dot_center_prev = None
             return 0
 
-        if self.is_time_to_change_channel():
+        if not is_chair_resting and self.is_time_to_change_channel():
             self.kb.set_command("none none none")
             self.kb.release_all_key()
             self.kb.disable()
@@ -3910,7 +4004,7 @@ class MapleStoryAutoBot:
         ### Attack WatchDog ###
         ####################### Check if last attack is timeout
         dt = time.time() - self.t_last_attack
-        if self.cfg['bot']['mode'] == 'normal' and \
+        if not is_chair_resting and self.cfg['bot']['mode'] == 'normal' and \
             dt > self.cfg["watchdog"]["last_attack_timeout"]:
             logger.info(f"[Attack Timeout] Last attack timeout for {round(dt, 2)} seconds")
             cfg_action = self.cfg["watchdog"]["last_attack_timeout_action"]
@@ -3942,18 +4036,19 @@ class MapleStoryAutoBot:
         # regardless of FSM state and regardless of whether
         # is_show_debug_window is True/False).
         # ================================================================
-        try:
-            # The FSM state (e.g. PatrolState) may already have run mob
-            # detection this frame with the same data.  Don't run it twice:
-            # besides wasting a full template-match pass, a second call would
-            # recompute against an identical frame and could disturb the
-            # attack-cooldown bookkeeping.
-            if not getattr(self, "_mob_detection_ran_this_frame", False):
-                self.update_cmd_by_mob_detection()
-            self._mob_detection_ran_this_frame = True
-        except Exception as _e_mob:
-            logger.warning(f"[run_once] update_cmd_by_mob_detection raised: {_e_mob}")
-            self._mob_detection_ran_this_frame = False
+        if getattr(self.fsm.state, "name", None) != "resting":
+            try:
+                # The FSM state (e.g. PatrolState) may already have run mob
+                # detection this frame with the same data.  Don't run it twice:
+                # besides wasting a full template-match pass, a second call would
+                # recompute against an identical frame and could disturb the
+                # attack-cooldown bookkeeping.
+                if not getattr(self, "_mob_detection_ran_this_frame", False):
+                    self.update_cmd_by_mob_detection()
+                self._mob_detection_ran_this_frame = True
+            except Exception as _e_mob:
+                logger.warning(f"[run_once] update_cmd_by_mob_detection raised: {_e_mob}")
+                self._mob_detection_ran_this_frame = False
 
         # Also paint the debug viz layer (DETECT[...] line, monster boxes,
         # command overlay) every frame — F2 screenshots / Qt signal below

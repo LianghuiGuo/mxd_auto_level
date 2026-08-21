@@ -25,6 +25,9 @@ class HuntingState(State):
 
             return "finding_rune"
 
+        elif getattr(self.bot, "_chair_rest_pending", False):
+            return "resting"
+
         else:
             return None
 

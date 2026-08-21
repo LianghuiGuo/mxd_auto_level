@@ -1540,6 +1540,11 @@ class KeyBoardController():
         self.t_last_buff_cast = [0] * len(self.cfg["buff_skill"]["keys"]) # Last time cast buff skill
         # Flags
         self.is_enable = True
+        # RestingState uses this narrower switch instead of disable(): it
+        # suppresses movement/actions/buffs without changing the user's F1
+        # enable state. It is reset by each newly constructed controller.
+        self.automation_suspended = False
+        self._automation_suspend_keys_released = False
         self.is_need_force_heal = False
         self.is_terminated = False
         # Parameters
@@ -2254,6 +2259,17 @@ class KeyBoardController():
             if not self.is_enable:
                 self.limit_fps()
                 continue
+
+            if self.automation_suspended:
+                # Release once on the keyboard thread too, covering a race in
+                # which RestingState suspended us between a key-down and its
+                # next normal command iteration.
+                if not self._automation_suspend_keys_released:
+                    self.release_all_key()
+                    self._automation_suspend_keys_released = True
+                self.limit_fps()
+                continue
+            self._automation_suspend_keys_released = False
 
             # Ensure game window stays in the foreground (PyAutoGUI sends to
             # the foreground window globally; if the user clicks the Qt UI
