@@ -1,5 +1,6 @@
 opencv-python
 numpy
+scipy
 pyautogui
 pynput
 requests

@@ -18,6 +18,8 @@ maps/
 media/
 # Any git bundle backups (history-rewrite safety copies) — never commit these.
 *.bundle
+# Local recordings and generated replay videos are large and reproducible.
+*.mp4
 
 # Auto-generated absolute-path copies of data.yaml (train.py writes these).
 ml/*.abs.yaml
@@ -39,3 +41,7 @@ ml/dataset*/**
 !ml/dataset/labels/train/
 !ml/dataset/labels/val/
 !ml/dataset/**/.gitkeep
+
+# Generated lie-detector YOLO samples (large and reproducible).
+ml/lie_dataset/images/
+ml/lie_dataset/labels/
