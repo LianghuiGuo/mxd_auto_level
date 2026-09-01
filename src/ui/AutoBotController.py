@@ -110,13 +110,13 @@ class AutoBotController(QObject):
         '''
         Called when user press start record button
         '''
-        self.auto_bot.start_record()
+        return self.auto_bot.start_record()
 
     def stop_recording(self):
         '''
         Called when user press stop record button
         '''
-        self.auto_bot.stop_record()
+        return self.auto_bot.stop_record()
 
     def terminate_bot(self):
         '''

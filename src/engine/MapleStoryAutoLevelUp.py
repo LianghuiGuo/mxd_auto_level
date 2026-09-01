@@ -61,6 +61,12 @@ class MapleStoryAutoBot:
         self.fps = 0 # Frame per second
         self.red_dot_center_prev = None # previous other player location in minimap
         self.video_writer = None # For video recording feature
+        # F3 is handled by the UI thread while frames are produced by the bot
+        # thread.  Serialise writer replacement/release with frame writes so a
+        # stop click cannot release the encoder in the middle of write().
+        self._video_writer_lock = threading.Lock()
+        self._video_path = None
+        self._video_frames_written = 0
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
         # Party-red-bar anti-false-positive (FP) guards -------------------------------------------------
@@ -570,7 +576,10 @@ class MapleStoryAutoBot:
         '''
         Terminate thread except main thread
         '''
-        self.terminate_threads()
+        # Keep an active F3 recording open across an F1 pause/resume cycle;
+        # the record button remains checked and the next start will continue
+        # appending frames to the same file.
+        self.terminate_threads(finalize_recording=False)
 
     def enable_viz(self):
         '''
@@ -596,21 +605,122 @@ class MapleStoryAutoBot:
 
         # Make sure video/ exist
         os.makedirs("video", exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        path = os.path.join("video", f"{timestamp}.mp4")
+        # Do not leak an earlier writer if this method is called twice (for
+        # example, from both a button click and a repeated function-key event).
+        if self.video_writer is not None:
+            self.stop_record()
 
-        # Get video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4 codec
-        self.video_writer = cv2.VideoWriter(path, fourcc, 10, WINDOW_WORKING_SIZE)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+        candidates = [
+            ("mp4v", os.path.join("video", f"{timestamp}.mp4")),
+            # Some OpenCV distributions do not ship an MP4 encoder.  MJPG/AVI
+            # is a broadly available fallback and is preferable to silently
+            # leaving a zero-byte MP4 behind.
+            ("MJPG", os.path.join("video", f"{timestamp}.avi")),
+        ]
+
+        writer = None
+        path = None
+        for codec, candidate_path in candidates:
+            candidate_writer = cv2.VideoWriter(
+                candidate_path,
+                cv2.VideoWriter_fourcc(*codec),
+                10,
+                WINDOW_WORKING_SIZE,
+            )
+            if candidate_writer.isOpened():
+                writer = candidate_writer
+                path = candidate_path
+                break
+
+            candidate_writer.release()
+            # A failed OpenCV backend may still create an empty placeholder.
+            try:
+                if os.path.isfile(candidate_path) and \
+                        os.path.getsize(candidate_path) == 0:
+                    os.remove(candidate_path)
+            except OSError:
+                pass
+
+        if writer is None:
+            logger.error(
+                "[start_record] Unable to open a video encoder "
+                "(tried mp4v/MP4 and MJPG/AVI)"
+            )
+            return False
+
+        with self._video_writer_lock:
+            self.video_writer = writer
+            self._video_path = path
+            self._video_frames_written = 0
 
         logger.info(f"[start_record] Record video to {path}")
+        return True
 
     def stop_record(self):
         '''
         Stop Record
         '''
-        self.video_writer = None
-        logger.info("[stop_record] Stop recording")
+        # MP4 writes its stream index/trailer during release().  Merely
+        # dropping the Python reference leaves an empty or unplayable file.
+        with self._video_writer_lock:
+            writer = self.video_writer
+            path = self._video_path
+            frames_written = self._video_frames_written
+            self.video_writer = None
+            self._video_path = None
+            self._video_frames_written = 0
+            if writer is not None:
+                writer.release()
+
+        if writer is None:
+            logger.info("[stop_record] Recording is not active")
+            return None
+
+        try:
+            size = os.path.getsize(path)
+        except (OSError, TypeError):
+            size = -1
+        logger.info(
+            f"[stop_record] Stop recording: {path}, "
+            f"frames={frames_written}, bytes={size}"
+        )
+        if frames_written == 0:
+            logger.warning(
+                "[stop_record] No frames were recorded. Start the bot and "
+                "confirm that game-window capture is producing frames."
+            )
+        return path
+
+    def _write_recording_frame(self):
+        '''Write the current debug frame when an F3 recording is active.'''
+        frame = self.img_frame_debug
+        if frame is None:
+            return
+
+        try:
+            # VideoWriter requires a fixed-size, 3-channel BGR frame.
+            if frame.ndim == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            elif frame.ndim != 3:
+                return
+            elif frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            elif frame.shape[2] != 3:
+                return
+
+            expected_w, expected_h = WINDOW_WORKING_SIZE
+            if frame.shape[1] != expected_w or frame.shape[0] != expected_h:
+                frame = cv2.resize(frame, WINDOW_WORKING_SIZE,
+                                   interpolation=cv2.INTER_AREA)
+
+            with self._video_writer_lock:
+                if self.video_writer is None:
+                    return
+                self.video_writer.write(frame)
+                self._video_frames_written += 1
+        except Exception as exc:
+            logger.warning(f"[_write_recording_frame] Failed to write frame: {exc}")
 
     def get_player_location_camera_center_fallback(self):
         '''
@@ -2881,10 +2991,15 @@ class MapleStoryAutoBot:
         self.fsm.set_init_state("hunting")
         self.t_last_attack = time.time() # Update timer
 
-    def terminate_threads(self):
+    def terminate_threads(self, finalize_recording=True):
         '''
         terminate all threads
         '''
+        # Finalise an active recording on application shutdown.  F1 pause opts
+        # out because its UI record button remains checked and recording is
+        # expected to resume with the bot.
+        if finalize_recording:
+            self.stop_record()
         # Terminate keyboard controller
         if self.kb is not None:
             self.kb.is_terminated = True
@@ -4074,6 +4189,11 @@ class MapleStoryAutoBot:
         #####################
         ### Debug Windows ###
         #####################
+        # Recording is independent from cv2 window emission.  In UI mode
+        # `_should_emit_debug_to_cv2` is deliberately False, but F3 must still
+        # write every processed frame.
+        self._write_recording_frame()
+
         # Only the *cv2 window emission* is gated by the viz flag.
         if getattr(self, '_should_emit_debug_to_cv2',
                    bool(self.is_show_debug_window)):
@@ -4081,13 +4201,6 @@ class MapleStoryAutoBot:
                 self.update_img_frame_debug()  # calls cv2.imshow internally
             except Exception:
                 pass
-
-            # Save debug window to video
-            if self.video_writer:
-                try:
-                    self.video_writer.write(self.img_frame_debug)
-                except Exception:
-                    pass
 
             # Resize img_route_debug for better visualization
             if self.cfg["bot"]["mode"] == "normal":

@@ -878,7 +878,12 @@ class MainWindow(QMainWindow):
         if self.button_record.isChecked():
             self.button_record.setText("⏹ Stop (F3)")
             self.button_record.setStyleSheet("background-color: orange;")
-            self.controller.start_recording()
+            if self.controller.start_recording() is False:
+                # Keep the UI state truthful when this OpenCV build has no
+                # usable video encoder.
+                self.button_record.setChecked(False)
+                self.button_record.setText("⏺ Record (F3)")
+                self.button_record.setStyleSheet("")
         else:
             self.button_record.setText("⏺ Record (F3)")
             self.button_record.setStyleSheet("")
