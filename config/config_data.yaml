@@ -27,6 +27,8 @@ eng_to_cn:
   pearl_harbor_outskirts: 明珠港郊外
   south_forest_training_ground_1: 南部森林训练场1
   south_forest_training_ground_4: 南部森林训练场4
+  east_mountain_6: 东部岩山6
+  deep_mountain_3: 幽深峡谷3
   
   # monster
   zombie_lupin: 天使猴
@@ -34,7 +36,7 @@ eng_to_cn:
   brown_windup_bear: 褐色發條熊
   cold_eye: 冰獨眼獸
   evolved_ghost: 進化妖魔
-  fire_boar: 火肥肥
+  fire_boar: 火野猪
   green_mushroom: 綠菇菇
   mushroom: 菇菇寶貝
   pig: 肥肥
@@ -43,7 +45,7 @@ eng_to_cn:
   skeleton_officer: 骷髏隊長
   skeleton_soldier: 骷髏士兵
   spike_mushroom: 刺菇菇
-  wild_boar: 黑肥肥
+  wild_boar: 野猪
   wild_kargo: 魔龍
   wind_single_eye_beast: 風獨眼獸
   zombie_mushroom: 殭屍菇菇
@@ -65,6 +67,8 @@ eng_to_cn:
   zombie_mushroom: 僵尸蘑菇
   horny_mushroom: 刺蘑菇
   blue_mushroom: 蓝蘑菇
+  dark_axe_stump: 黑斧木妖
+  axe_stump: 斧木妖
 
 # Register mobs in each maps
 map_mobs_mapping:
@@ -94,3 +98,5 @@ map_mobs_mapping:
   pearl_harbor_outskirts: [blue_snail, red_snail, slime]
   south_forest_training_ground_1: [blue_snail, red_snail, slime]
   south_forest_training_ground_4: [slime, horny_mushroom, blue_mushroom, green_mushroom]
+  east_mountain_6: [wild_boar, dark_axe_stump]
+  deep_mountain_3: [wild_boar, fire_boar, axe_stump, dark_axe_stump]

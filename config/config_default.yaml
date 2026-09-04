@@ -267,9 +267,9 @@ chair_rest:
   # 🪑 Periodic chair rest (normal mode only).
   # One round means completing every route*.png once: the last route reaches
   # its goal and wraps back to route1. F1 pause/restart resets the counter.
-  enabled: false              # ✅ Enable resting after a configured number of rounds.
-  rounds_before_rest: 10      # 🔁 Completed full route rounds before each rest; must be > 0.
-  duration_minutes: 5.0       # ⏱️ Chair-rest duration in minutes; must be > 0.
+  enabled: true              # ✅ Enable resting after a configured number of rounds.
+  rounds_before_rest: 1      # 🔁 Completed full route rounds before each rest; must be > 0.
+  duration_minutes: 1.0       # ⏱️ Chair-rest duration in minutes; must be > 0.
   key: "c"                    # ⌨️ In-game chair key.
   settle_seconds: 1.0         # 🛑 Wait after all controls stop before trying to sit.
   sit_retry_count: 3          # 🪑 C only sits (does not stand), so retry safely if the game ignores it.
@@ -368,7 +368,7 @@ minimap:
   # 完全对齐（map_padding=30 时命中 (30,30)）。之前 manual_roi=null 走 dark-brown 自动
   # 裁剪，裁出的高度会随小地图内黄点/亮平台位置每帧漂移几像素（例如 91 vs 85），
   # 导致 minimap→map 模板匹配时好时坏（score 时而 1.0），黄点定位漂移、路线时准时不准。
-  manual_roi: [1, 13, 161, 85]
+  # manual_roi: [1, 13, 161, 85]
   # 🚧 Auto-detect size caps (fraction of the FRAME w/h). The minimap lives in
   #    the top-left corner and is small; on maps whose scenery shares the
   #    minimap's brown/beige border colour (e.g. 明珠港郊外) the auto-detector

@@ -61,6 +61,8 @@ python3 ml/train.py \
   --data data_lie.yaml \
   --name lie_shape \
   --out models/lie_shape_yolo.pt
+
+python ml/train.py --data data_lie.yaml --name lie_shape --out models/lie_shape_yolo.pt --epochs 100
 ```
 
 训练脚本默认使用：

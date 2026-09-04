@@ -62,12 +62,16 @@ python3 ml/synth.py --n 800          # 生成 800 张（自动 80% train / 20% v
 python ml/synth.py --n 800 --classes blue_snail,red_snail,slime \
     --data data_snails.yaml --dataset dataset_snails --no-player
 python ml/synth.py --n 800 --classes slime,green_mushroom,horny_mushroom,blue_mushroom --data data_horny_mushroom.yaml --dataset dataset_horny_mushroom
+python ml/synth.py --n 800 --classes wild_boar,fire_boar,axe_stump,dark_axe_stump --data data_boar.yaml --dataset dataset_boar
 
 # 训练（独立 run 名 + 独立输出权重）
 python ml/train.py --data data_snails.yaml --name snails \
     --out models/mob_yolo_snails.pt
 
 python ml/train.py --data data_horny_mushroom.yaml --name horny_mushroom --out models/mob_yolo_horny_mushroom.pt
+
+python ml/train.py --data data_boar.yaml --name boar --out models/mob_yolo_boar.pt
+
 ```
 
 使用时在 config 里把 `yolo_model_path` 指向该权重：
