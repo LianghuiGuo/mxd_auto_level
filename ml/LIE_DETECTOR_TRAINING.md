@@ -360,14 +360,7 @@ python3 ml/build_lie_dataset_v2.py \
 已有 `lie_manual_dataset` 时，直接训，不必先生成合成数据。命令见 **§A.6**。
 
 ```bash
-python3 ml/train.py \
-  --lie-detector \
-  --data data_lie_manual.yaml \
-  --model yolo11n.pt \
-  --epochs 40 \
-  --batch 8 \
-  --name lie_shape_manual \
-  --out models/lie_shape_yolo_manual.pt
+python ml/train.py --lie-detector --data data_lie_manual.yaml --model yolo11n.pt --epochs 40 --batch 8 --name lie_shape_manual --out models/lie_shape_yolo_manual.pt
 ```
 
 ### 3.2 合成 V2 模型
