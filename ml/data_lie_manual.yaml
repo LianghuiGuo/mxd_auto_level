@@ -1,0 +1,5 @@
+path: lie_manual_dataset
+train: images/train
+val: images/val
+names:
+  0: lie_shape

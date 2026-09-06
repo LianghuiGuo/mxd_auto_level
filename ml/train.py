@@ -8,6 +8,7 @@ Prerequisites:
 
 Usage:
   python3 ml/train.py                 # default: yolo11n, 100 epochs, 640 imgsz
+  python3 ml/train.py --lie-detector --data data_lie_v2.yaml  # 768 imgsz
   python3 ml/train.py --epochs 200 --model yolov8n.pt --imgsz 640
 
 On a machine WITH an NVIDIA GPU this uses CUDA automatically.  On CPU it still
@@ -69,7 +70,12 @@ def main():
     ap.add_argument("--model", default="yolo11n.pt",
                     help="base weights to fine-tune from")
     ap.add_argument("--epochs", type=int, default=100)
-    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument(
+        "--imgsz",
+        type=int,
+        default=None,
+        help="training image size; defaults to 768 for --lie-detector, 640 otherwise",
+    )
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--device", default=None,
                     help="e.g. '0' for first GPU, 'cpu' to force CPU. "
@@ -82,6 +88,11 @@ def main():
     ap.add_argument("--out", default="models/mob_yolo.pt",
                     help="where to copy the best weights (repo-relative). Use a "
                          "distinct path per model, e.g. models/mob_yolo_snails.pt")
+    ap.add_argument(
+        "--lie-detector",
+        action="store_true",
+        help="use low-domain-shift augmentation for lie-shape training",
+    )
     args = ap.parse_args()
 
     try:
@@ -118,10 +129,31 @@ def main():
             except Exception as e:  # noqa: BLE001
                 print(f"[weights] could not cache base model: {e}")
 
+    image_size = args.imgsz or (768 if args.lie_detector else 640)
+    training_options = {}
+    if args.lie_detector:
+        # The V2 generator already creates rotation, overlap, compression and
+        # scale variation.  Generic YOLO defaults (especially four-image
+        # Mosaic and strong HSV jitter) create scenes unlike the fixed game
+        # canvas and previously made synthetic validation misleadingly easy.
+        training_options.update(
+            mosaic=0.0,
+            mixup=0.0,
+            copy_paste=0.0,
+            degrees=0.0,
+            translate=0.03,
+            scale=0.15,
+            hsv_h=0.005,
+            hsv_s=0.15,
+            hsv_v=0.15,
+            fliplr=0.5,
+            patience=15,
+        )
+
     results = model.train(
         data=data_yaml,
         epochs=args.epochs,
-        imgsz=args.imgsz,
+        imgsz=image_size,
         batch=args.batch,
         device=args.device,
         # Skip the AMP self-check.  It downloads the newest nano model
@@ -131,6 +163,7 @@ def main():
         project=os.path.join(HERE, "runs"),
         name=args.name,
         exist_ok=True,
+        **training_options,
     )
 
     # Locate best.pt and copy to the requested output path for the engine.
@@ -141,8 +174,11 @@ def main():
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy(best, dest)
         print(f"\nCopied best weights -> {dest}")
-        print(f"Set config monster_detect.mode: 'yolo' and "
-              f"yolo_model_path: '{args.out}' to use it.")
+        if args.lie_detector:
+            print(f"Lie-shape weights ready: '{args.out}'")
+        else:
+            print(f"Set config monster_detect.mode: 'yolo' and "
+                  f"yolo_model_path: '{args.out}' to use it.")
     else:
         print(f"[warn] could not find {best}; check training output.")
 

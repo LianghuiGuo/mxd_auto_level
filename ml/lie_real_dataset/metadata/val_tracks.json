@@ -1,0 +1,2522 @@
+[
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 0,
+    "timestamp": 0.0,
+    "phase": "highlight",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00000.jpg",
+    "label": "labels/val/测谎录屏11_00000.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 1,
+    "timestamp": 0.111,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00001.jpg",
+    "label": "labels/val/测谎录屏11_00001.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 2,
+    "timestamp": 0.222,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00002.jpg",
+    "label": "labels/val/测谎录屏11_00002.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 3,
+    "timestamp": 0.333,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00003.jpg",
+    "label": "labels/val/测谎录屏11_00003.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 4,
+    "timestamp": 0.444,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00004.jpg",
+    "label": "labels/val/测谎录屏11_00004.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 5,
+    "timestamp": 0.555,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00005.jpg",
+    "label": "labels/val/测谎录屏11_00005.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 6,
+    "timestamp": 0.667,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00006.jpg",
+    "label": "labels/val/测谎录屏11_00006.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 7,
+    "timestamp": 0.778,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00007.jpg",
+    "label": "labels/val/测谎录屏11_00007.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 8,
+    "timestamp": 0.889,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00008.jpg",
+    "label": "labels/val/测谎录屏11_00008.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 9,
+    "timestamp": 1.0,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00009.jpg",
+    "label": "labels/val/测谎录屏11_00009.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 10,
+    "timestamp": 1.111,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00010.jpg",
+    "label": "labels/val/测谎录屏11_00010.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 11,
+    "timestamp": 1.222,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00011.jpg",
+    "label": "labels/val/测谎录屏11_00011.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 12,
+    "timestamp": 1.333,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00012.jpg",
+    "label": "labels/val/测谎录屏11_00012.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 13,
+    "timestamp": 1.444,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00013.jpg",
+    "label": "labels/val/测谎录屏11_00013.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 14,
+    "timestamp": 1.555,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00014.jpg",
+    "label": "labels/val/测谎录屏11_00014.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 15,
+    "timestamp": 1.667,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00015.jpg",
+    "label": "labels/val/测谎录屏11_00015.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 16,
+    "timestamp": 1.778,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00016.jpg",
+    "label": "labels/val/测谎录屏11_00016.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 17,
+    "timestamp": 1.889,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00017.jpg",
+    "label": "labels/val/测谎录屏11_00017.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 18,
+    "timestamp": 2.0,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00018.jpg",
+    "label": "labels/val/测谎录屏11_00018.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 19,
+    "timestamp": 2.111,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00019.jpg",
+    "label": "labels/val/测谎录屏11_00019.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 20,
+    "timestamp": 2.222,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00020.jpg",
+    "label": "labels/val/测谎录屏11_00020.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 21,
+    "timestamp": 2.333,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00021.jpg",
+    "label": "labels/val/测谎录屏11_00021.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 22,
+    "timestamp": 2.444,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00022.jpg",
+    "label": "labels/val/测谎录屏11_00022.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 23,
+    "timestamp": 2.555,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00023.jpg",
+    "label": "labels/val/测谎录屏11_00023.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 24,
+    "timestamp": 2.666,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00024.jpg",
+    "label": "labels/val/测谎录屏11_00024.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 25,
+    "timestamp": 2.778,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00025.jpg",
+    "label": "labels/val/测谎录屏11_00025.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 26,
+    "timestamp": 2.889,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00026.jpg",
+    "label": "labels/val/测谎录屏11_00026.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 27,
+    "timestamp": 3.0,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00027.jpg",
+    "label": "labels/val/测谎录屏11_00027.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 28,
+    "timestamp": 3.111,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00028.jpg",
+    "label": "labels/val/测谎录屏11_00028.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 29,
+    "timestamp": 3.361,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00029.jpg",
+    "label": "labels/val/测谎录屏11_00029.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 30,
+    "timestamp": 3.612,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00030.jpg",
+    "label": "labels/val/测谎录屏11_00030.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 31,
+    "timestamp": 3.863,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00031.jpg",
+    "label": "labels/val/测谎录屏11_00031.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 32,
+    "timestamp": 4.113,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00032.jpg",
+    "label": "labels/val/测谎录屏11_00032.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 33,
+    "timestamp": 4.364,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00033.jpg",
+    "label": "labels/val/测谎录屏11_00033.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 34,
+    "timestamp": 4.615,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00034.jpg",
+    "label": "labels/val/测谎录屏11_00034.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 35,
+    "timestamp": 4.865,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00035.jpg",
+    "label": "labels/val/测谎录屏11_00035.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 36,
+    "timestamp": 5.116,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00036.jpg",
+    "label": "labels/val/测谎录屏11_00036.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 37,
+    "timestamp": 5.367,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00037.jpg",
+    "label": "labels/val/测谎录屏11_00037.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 38,
+    "timestamp": 5.617,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00038.jpg",
+    "label": "labels/val/测谎录屏11_00038.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 39,
+    "timestamp": 5.868,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00039.jpg",
+    "label": "labels/val/测谎录屏11_00039.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 40,
+    "timestamp": 6.119,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00040.jpg",
+    "label": "labels/val/测谎录屏11_00040.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 41,
+    "timestamp": 6.369,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00041.jpg",
+    "label": "labels/val/测谎录屏11_00041.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 42,
+    "timestamp": 6.62,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00042.jpg",
+    "label": "labels/val/测谎录屏11_00042.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 43,
+    "timestamp": 6.871,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00043.jpg",
+    "label": "labels/val/测谎录屏11_00043.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 44,
+    "timestamp": 7.121,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00044.jpg",
+    "label": "labels/val/测谎录屏11_00044.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 45,
+    "timestamp": 7.372,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00045.jpg",
+    "label": "labels/val/测谎录屏11_00045.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 46,
+    "timestamp": 7.623,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00046.jpg",
+    "label": "labels/val/测谎录屏11_00046.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 47,
+    "timestamp": 7.873,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00047.jpg",
+    "label": "labels/val/测谎录屏11_00047.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 48,
+    "timestamp": 8.124,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00048.jpg",
+    "label": "labels/val/测谎录屏11_00048.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 49,
+    "timestamp": 8.375,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00049.jpg",
+    "label": "labels/val/测谎录屏11_00049.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 50,
+    "timestamp": 8.625,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00050.jpg",
+    "label": "labels/val/测谎录屏11_00050.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 51,
+    "timestamp": 8.876,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00051.jpg",
+    "label": "labels/val/测谎录屏11_00051.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 52,
+    "timestamp": 9.127,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00052.jpg",
+    "label": "labels/val/测谎录屏11_00052.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 53,
+    "timestamp": 9.377,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00053.jpg",
+    "label": "labels/val/测谎录屏11_00053.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 54,
+    "timestamp": 9.628,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00054.jpg",
+    "label": "labels/val/测谎录屏11_00054.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 55,
+    "timestamp": 9.879,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00055.jpg",
+    "label": "labels/val/测谎录屏11_00055.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 56,
+    "timestamp": 10.129,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00056.jpg",
+    "label": "labels/val/测谎录屏11_00056.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 57,
+    "timestamp": 10.38,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00057.jpg",
+    "label": "labels/val/测谎录屏11_00057.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 58,
+    "timestamp": 10.631,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00058.jpg",
+    "label": "labels/val/测谎录屏11_00058.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 59,
+    "timestamp": 10.881,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00059.jpg",
+    "label": "labels/val/测谎录屏11_00059.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 60,
+    "timestamp": 11.132,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00060.jpg",
+    "label": "labels/val/测谎录屏11_00060.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 61,
+    "timestamp": 11.383,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00061.jpg",
+    "label": "labels/val/测谎录屏11_00061.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 62,
+    "timestamp": 11.633,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00062.jpg",
+    "label": "labels/val/测谎录屏11_00062.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 63,
+    "timestamp": 11.884,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00063.jpg",
+    "label": "labels/val/测谎录屏11_00063.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 64,
+    "timestamp": 12.135,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00064.jpg",
+    "label": "labels/val/测谎录屏11_00064.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 65,
+    "timestamp": 12.385,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00065.jpg",
+    "label": "labels/val/测谎录屏11_00065.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 66,
+    "timestamp": 12.636,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00066.jpg",
+    "label": "labels/val/测谎录屏11_00066.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 67,
+    "timestamp": 12.887,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00067.jpg",
+    "label": "labels/val/测谎录屏11_00067.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 68,
+    "timestamp": 13.137,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00068.jpg",
+    "label": "labels/val/测谎录屏11_00068.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 69,
+    "timestamp": 13.388,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00069.jpg",
+    "label": "labels/val/测谎录屏11_00069.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 70,
+    "timestamp": 13.639,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00070.jpg",
+    "label": "labels/val/测谎录屏11_00070.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏11.mp4",
+    "frame_index": 71,
+    "timestamp": 13.889,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏11_00071.jpg",
+    "label": "labels/val/测谎录屏11_00071.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          9,
+          690,
+          477
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 0,
+    "timestamp": 0.0,
+    "phase": "highlight",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00000.jpg",
+    "label": "labels/val/测谎录屏4_00000.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 1,
+    "timestamp": 0.478,
+    "phase": "highlight",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00001.jpg",
+    "label": "labels/val/测谎录屏4_00001.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 2,
+    "timestamp": 0.956,
+    "phase": "highlight",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00002.jpg",
+    "label": "labels/val/测谎录屏4_00002.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 3,
+    "timestamp": 1.434,
+    "phase": "highlight",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00003.jpg",
+    "label": "labels/val/测谎录屏4_00003.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 4,
+    "timestamp": 1.912,
+    "phase": "highlight",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00004.jpg",
+    "label": "labels/val/测谎录屏4_00004.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 5,
+    "timestamp": 2.39,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00005.jpg",
+    "label": "labels/val/测谎录屏4_00005.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 6,
+    "timestamp": 2.498,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00006.jpg",
+    "label": "labels/val/测谎录屏4_00006.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 7,
+    "timestamp": 2.605,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00007.jpg",
+    "label": "labels/val/测谎录屏4_00007.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 8,
+    "timestamp": 2.713,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00008.jpg",
+    "label": "labels/val/测谎录屏4_00008.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 9,
+    "timestamp": 2.82,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00009.jpg",
+    "label": "labels/val/测谎录屏4_00009.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 10,
+    "timestamp": 2.928,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00010.jpg",
+    "label": "labels/val/测谎录屏4_00010.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 11,
+    "timestamp": 3.036,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00011.jpg",
+    "label": "labels/val/测谎录屏4_00011.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 12,
+    "timestamp": 3.143,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00012.jpg",
+    "label": "labels/val/测谎录屏4_00012.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 13,
+    "timestamp": 3.251,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00013.jpg",
+    "label": "labels/val/测谎录屏4_00013.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 14,
+    "timestamp": 3.358,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00014.jpg",
+    "label": "labels/val/测谎录屏4_00014.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 15,
+    "timestamp": 3.466,
+    "phase": "fade",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00015.jpg",
+    "label": "labels/val/测谎录屏4_00015.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 16,
+    "timestamp": 3.574,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00016.jpg",
+    "label": "labels/val/测谎录屏4_00016.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 17,
+    "timestamp": 3.82,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00017.jpg",
+    "label": "labels/val/测谎录屏4_00017.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 18,
+    "timestamp": 4.067,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00018.jpg",
+    "label": "labels/val/测谎录屏4_00018.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 19,
+    "timestamp": 4.314,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00019.jpg",
+    "label": "labels/val/测谎录屏4_00019.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 20,
+    "timestamp": 4.561,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00020.jpg",
+    "label": "labels/val/测谎录屏4_00020.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 21,
+    "timestamp": 4.808,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00021.jpg",
+    "label": "labels/val/测谎录屏4_00021.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 22,
+    "timestamp": 5.055,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00022.jpg",
+    "label": "labels/val/测谎录屏4_00022.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 23,
+    "timestamp": 5.302,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00023.jpg",
+    "label": "labels/val/测谎录屏4_00023.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 24,
+    "timestamp": 5.548,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00024.jpg",
+    "label": "labels/val/测谎录屏4_00024.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 25,
+    "timestamp": 5.795,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00025.jpg",
+    "label": "labels/val/测谎录屏4_00025.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 26,
+    "timestamp": 6.042,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00026.jpg",
+    "label": "labels/val/测谎录屏4_00026.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 27,
+    "timestamp": 6.289,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00027.jpg",
+    "label": "labels/val/测谎录屏4_00027.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 28,
+    "timestamp": 6.536,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00028.jpg",
+    "label": "labels/val/测谎录屏4_00028.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 29,
+    "timestamp": 6.783,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00029.jpg",
+    "label": "labels/val/测谎录屏4_00029.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 30,
+    "timestamp": 7.029,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00030.jpg",
+    "label": "labels/val/测谎录屏4_00030.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 31,
+    "timestamp": 7.276,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00031.jpg",
+    "label": "labels/val/测谎录屏4_00031.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  },
+  {
+    "video": "测谎录屏4.mp4",
+    "frame_index": 32,
+    "timestamp": 7.523,
+    "phase": "motion",
+    "split": "val",
+    "image": "images/val/测谎录屏4_00032.jpg",
+    "label": "labels/val/测谎录屏4_00032.txt",
+    "reference_size": null,
+    "objects": [
+      {
+        "track_id": 0,
+        "bbox_xyxy": [
+          0,
+          0,
+          690,
+          463
+        ],
+        "source": "bgdiff",
+        "is_target": null
+      }
+    ],
+    "box_count": 1
+  }
+]

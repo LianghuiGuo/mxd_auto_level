@@ -120,6 +120,28 @@ class LieDetectorTrackerTest(unittest.TestCase):
         self.assertLess(float(np.median([item.collective_residual for item in current[:-1]])), 4.0)
         self.assertGreater(outlier.collective_residual, 30.0)
 
+    def test_fuses_learned_evidence_without_dropping_classical_candidates(self):
+        tracker = LieDetectorTracker()
+        tracker.target_radius = 40.0
+        classical = [
+            ShapeDetection((100.0, 100.0), 40.0, (60, 60, 80, 80)),
+            ShapeDetection((250.0, 180.0), 40.0, (210, 140, 80, 80)),
+        ]
+        learned = [
+            ShapeDetection(
+                (103.0, 98.0),
+                40.0,
+                (63, 58, 80, 80),
+                score=0.72,
+                source="yolo",
+                yolo_confidence=0.72,
+            )
+        ]
+        fused = tracker._fuse_learned_candidates(classical, learned)
+        self.assertEqual(len(fused), 2)
+        self.assertAlmostEqual(classical[0].yolo_confidence, 0.72)
+        self.assertEqual(classical[1].yolo_confidence, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

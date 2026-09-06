@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>测谎面板手动标注</title>
+  <style>
+    :root {
+      --bg: #1a1d23; --panel: #242830; --border: #3a4050;
+      --text: #e8eaed; --muted: #9aa0a6; --accent: #4c8bf5;
+      --ok: #3dd68c; --warn: #f5a524; --box: #3dd68c; --sel: #ffd166;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      background: var(--bg); color: var(--text);
+      font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #app { display: grid; grid-template-columns: 270px 1fr 230px; height: 100%; }
+    aside, .right {
+      background: var(--panel); min-height: 0;
+      display: flex; flex-direction: column;
+    }
+    aside { border-right: 1px solid var(--border); }
+    .right { border-left: 1px solid var(--border); }
+    .hd {
+      padding: 12px 14px; font-weight: 600;
+      border-bottom: 1px solid var(--border);
+    }
+    .stats {
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      color: var(--muted); font-size: 12px; display: grid; gap: 4px;
+    }
+    .stats b { color: var(--text); }
+    #list { flex: 1; overflow: auto; padding: 6px; }
+    .item {
+      display: flex; justify-content: space-between; gap: 8px;
+      padding: 7px 8px; border-radius: 6px; cursor: pointer;
+      color: var(--muted); font-size: 12px;
+    }
+    .item:hover { background: #2c313c; }
+    .item.active { background: #313846; color: var(--text); }
+    .item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge { flex: none; min-width: 36px; text-align: right; }
+    .badge.done { color: var(--ok); }
+    .badge.empty { color: var(--warn); }
+    main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .toolbar {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 10px 12px; background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+    .toolbar .title {
+      margin-right: auto; color: var(--muted); font-size: 13px;
+      max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    button {
+      background: #323846; color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px;
+    }
+    button:hover { background: #3b4252; }
+    button.primary { background: var(--accent); border-color: transparent; color: #fff; }
+    button.danger { background: #5a3036; border-color: #7a4048; }
+    .stage {
+      flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+      padding: 12px; background: #12151a;
+    }
+    #canvas {
+      display: block; max-width: 100%; max-height: calc(100vh - 120px);
+      cursor: crosshair; box-shadow: 0 0 0 1px var(--border); background: #000;
+    }
+    .help {
+      padding: 10px 14px; color: var(--muted); font-size: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    kbd {
+      display: inline-block; min-width: 1.3em; text-align: center;
+      background: #1a1d23; border: 1px solid var(--border); border-radius: 4px;
+      padding: 0 4px; color: var(--text);
+      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    #boxes { flex: 1; overflow: auto; padding: 8px; font-size: 12px; }
+    .box-row {
+      padding: 6px 8px; border-radius: 6px; cursor: pointer; color: var(--muted);
+    }
+    .box-row.active { background: #313846; color: var(--sel); }
+    .toast {
+      position: fixed; right: 16px; bottom: 16px; z-index: 9;
+      background: #2a303c; border: 1px solid var(--border);
+      padding: 8px 12px; border-radius: 8px; opacity: 0;
+      transition: opacity .2s; pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <div class="hd">帧列表</div>
+    <div class="stats" id="stats">加载中…</div>
+    <div id="list"></div>
+  </aside>
+  <main>
+    <div class="toolbar">
+      <div class="title" id="title">—</div>
+      <button id="btnPrev">上一张</button>
+      <button id="btnNext">下一张</button>
+      <button id="btnSave" class="primary">保存</button>
+      <button id="btnEmpty">标为空帧</button>
+      <button id="btnUnset">取消标注</button>
+      <button id="btnDel" class="danger">删选中框</button>
+    </div>
+    <div class="stage"><canvas id="canvas"></canvas></div>
+  </main>
+  <div class="right">
+    <div class="hd">当前框</div>
+    <div class="help">
+      拖拽画框 · 点选 · 拖角点缩放<br/>
+      <kbd>S</kbd>保存 <kbd>A</kbd>/<kbd>D</kbd>翻页
+      <kbd>E</kbd>空帧 <kbd>Del</kbd>删框
+    </div>
+    <div id="boxes"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+(() => {
+  const S = {
+    items: [], index: 0, boxes: [], selected: -1, status: "unset",
+    dirty: false, img: null, nw: 0, nh: 0, scale: 1, drag: null,
+  };
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+  const listEl = document.getElementById("list");
+  const boxesEl = document.getElementById("boxes");
+  const statsEl = document.getElementById("stats");
+  const titleEl = document.getElementById("title");
+  const toastEl = document.getElementById("toast");
+
+  const toast = (m) => {
+    toastEl.textContent = m;
+    toastEl.classList.add("show");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => toastEl.classList.remove("show"), 1400);
+  };
+  const cur = () => S.items[S.index] || null;
+
+  function badge(it) {
+    if (it.status === "done") return `<span class="badge done">${it.box_count}</span>`;
+    if (it.status === "empty") return `<span class="badge empty">空</span>`;
+    return `<span class="badge">—</span>`;
+  }
+
+  function renderList() {
+    listEl.innerHTML = S.items.map((it, i) => `
+      <div class="item ${i === S.index ? "active" : ""}" data-i="${i}">
+        <span class="nm">${it.split}/${it.name}</span>${badge(it)}
+      </div>`).join("");
+  }
+
+  function renderStats(st) {
+    statsEl.innerHTML = `
+      <div>总计 <b>${st.total}</b></div>
+      <div>已标 <b style="color:var(--ok)">${st.done}</b>
+           · 空帧 <b style="color:var(--warn)">${st.empty}</b>
+           · 未标 <b>${st.unset}</b></div>
+      <div>框数 <b>${st.boxes}</b> · 单类 lie_shape</div>`;
+  }
+
+  function renderBoxes() {
+    if (S.status === "empty") {
+      boxesEl.innerHTML = `<div class="box-row">负样本：本帧无图案</div>`;
+      return;
+    }
+    if (!S.boxes.length) {
+      boxesEl.innerHTML = `<div class="box-row">尚无框，拖拽绘制</div>`;
+      return;
+    }
+    boxesEl.innerHTML = S.boxes.map((b, i) => {
+      const [x1,y1,x2,y2] = b.map(Math.round);
+      return `<div class="box-row ${i === S.selected ? "active" : ""}" data-i="${i}">
+        #${i + 1} ${x2 - x1}×${y2 - y1} @(${x1},${y1})</div>`;
+    }).join("");
+  }
+
+  function fit() {
+    if (!S.img) return;
+    const stage = document.querySelector(".stage");
+    const scale = Math.min(
+      (stage.clientWidth - 24) / S.nw,
+      (stage.clientHeight - 24) / S.nh,
+      1
+    );
+    S.scale = scale;
+    canvas.width = Math.round(S.nw * scale);
+    canvas.height = Math.round(S.nh * scale);
+    draw();
+  }
+
+  function draw() {
+    if (!S.img) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(S.img, 0, 0, canvas.width, canvas.height);
+    S.boxes.forEach((b, i) => {
+      const [x1, y1, x2, y2] = b.map((v) => v * S.scale);
+      const sel = i === S.selected;
+      ctx.strokeStyle = sel ? "#ffd166" : "#3dd68c";
+      ctx.lineWidth = sel ? 2.5 : 2;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      if (sel) {
+        ctx.fillStyle = "#ffd166";
+        [[x1,y1],[x2,y1],[x1,y2],[x2,y2],
+         [(x1+x2)/2,y1],[(x1+x2)/2,y2],[x1,(y1+y2)/2],[x2,(y1+y2)/2]
+        ].forEach(([hx, hy]) => ctx.fillRect(hx - 3, hy - 3, 6, 6));
+      }
+    });
+    if (S.drag && S.drag.mode === "draw" && S.drag.curr) {
+      const a = S.drag.start, c = S.drag.curr;
+      const x1 = Math.min(a.x, c.x) * S.scale;
+      const y1 = Math.min(a.y, c.y) * S.scale;
+      const x2 = Math.max(a.x, c.x) * S.scale;
+      const y2 = Math.max(a.y, c.y) * S.scale;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = "#4c8bf5";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.setLineDash([]);
+    }
+  }
+
+  function pt(evt) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(S.nw, (evt.clientX - r.left) / S.scale)),
+      y: Math.max(0, Math.min(S.nh, (evt.clientY - r.top) / S.scale)),
+    };
+  }
+
+  function clamp(b) {
+    let [x1, y1, x2, y2] = b;
+    x1 = Math.max(0, Math.min(S.nw, x1));
+    x2 = Math.max(0, Math.min(S.nw, x2));
+    y1 = Math.max(0, Math.min(S.nh, y1));
+    y2 = Math.max(0, Math.min(S.nh, y2));
+    if (x2 < x1) [x1, x2] = [x2, x1];
+    if (y2 < y1) [y1, y2] = [y2, y1];
+    return [x1, y1, x2, y2];
+  }
+
+  function hitBox(p) {
+    for (let i = S.boxes.length - 1; i >= 0; i--) {
+      const [x1, y1, x2, y2] = S.boxes[i];
+      if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) return i;
+    }
+    return -1;
+  }
+
+  function hitHandle(p) {
+    if (S.selected < 0) return null;
+    const [x1, y1, x2, y2] = S.boxes[S.selected];
+    const tol = 6 / S.scale;
+    const pts = {
+      nw: [x1, y1], ne: [x2, y1], sw: [x1, y2], se: [x2, y2],
+      n: [(x1 + x2) / 2, y1], s: [(x1 + x2) / 2, y2],
+      w: [x1, (y1 + y2) / 2], e: [x2, (y1 + y2) / 2],
+    };
+    for (const [k, [hx, hy]] of Object.entries(pts)) {
+      if (Math.abs(p.x - hx) <= tol && Math.abs(p.y - hy) <= tol) return k;
+    }
+    return null;
+  }
+
+  function toYolo() {
+    return S.boxes.map(([x1, y1, x2, y2]) => [
+      0,
+      ((x1 + x2) / 2) / S.nw,
+      ((y1 + y2) / 2) / S.nh,
+      (x2 - x1) / S.nw,
+      (y2 - y1) / S.nh,
+    ]);
+  }
+
+  function fromYolo(rows) {
+    return rows.map(([, cx, cy, w, h]) => {
+      const bw = w * S.nw, bh = h * S.nh;
+      const x1 = cx * S.nw - bw / 2;
+      const y1 = cy * S.nh - bh / 2;
+      return clamp([x1, y1, x1 + bw, y1 + bh]);
+    });
+  }
+
+  async function loadList() {
+    const data = await fetch("/api/list").then((r) => r.json());
+    S.items = data.items;
+    renderStats(data.stats);
+    renderList();
+    if (S.items.length) await openIndex(0, true);
+    else titleEl.textContent = "没有图片：先运行 prepare_lie_manual_subset.py";
+  }
+
+  async function openIndex(i, force = false) {
+    if (!force && S.dirty && !confirm("当前帧未保存，放弃修改？")) return;
+    S.index = Math.max(0, Math.min(S.items.length - 1, i));
+    const it = cur();
+    if (!it) return;
+    titleEl.textContent = `${it.split}/${it.name}  [${it.status}]`;
+    renderList();
+
+    const img = new Image();
+    img.src = `/api/image/${it.split}/${encodeURIComponent(it.name)}`;
+    await img.decode();
+    S.img = img; S.nw = img.naturalWidth; S.nh = img.naturalHeight;
+
+    const label = await fetch(
+      `/api/label/${it.split}/${encodeURIComponent(it.name)}`
+    ).then((r) => r.json());
+    S.status = label.status;
+    S.boxes = label.status === "done" ? fromYolo(label.boxes || []) : [];
+    S.selected = S.boxes.length ? 0 : -1;
+    S.dirty = false;
+    fit();
+    renderBoxes();
+  }
+
+  async function save(status = null) {
+    const it = cur();
+    if (!it) return;
+    let st = status;
+    if (!st) st = S.boxes.length ? "done" : "empty";
+    if (st === "done" && !S.boxes.length) {
+      toast("没有框：请画框，或按 E 标为空帧");
+      return;
+    }
+    const res = await fetch(
+      `/api/label/${it.split}/${encodeURIComponent(it.name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: st,
+          boxes: st === "done" ? toYolo() : [],
+        }),
+      }
+    );
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || "保存失败"); return; }
+    S.status = st;
+    S.dirty = false;
+    if (st === "empty") S.boxes = [];
+    it.status = st;
+    it.box_count = st === "done" ? S.boxes.length : 0;
+    titleEl.textContent = `${it.split}/${it.name}  [${it.status}]`;
+    renderList();
+    renderBoxes();
+    toast(st === "empty" ? "已标为空帧" : st === "unset" ? "已取消标注" : `已保存 ${it.box_count} 框`);
+    const list = await fetch("/api/list").then((r) => r.json());
+    renderStats(list.stats);
+  }
+
+  canvas.addEventListener("mousedown", (evt) => {
+    if (!S.img) return;
+    const p = pt(evt);
+    const handle = hitHandle(p);
+    if (handle) {
+      S.drag = { mode: "resize", handle, origin: S.boxes[S.selected].slice(), start: p };
+      return;
+    }
+    const hit = hitBox(p);
+    if (hit >= 0) {
+      S.selected = hit;
+      S.drag = { mode: "move", origin: S.boxes[hit].slice(), start: p };
+      renderBoxes(); draw();
+      return;
+    }
+    S.selected = -1;
+    S.drag = { mode: "draw", start: p, curr: p };
+    renderBoxes(); draw();
+  });
+
+  window.addEventListener("mousemove", (evt) => {
+    if (!S.drag) return;
+    const p = pt(evt);
+    if (S.drag.mode === "draw") {
+      S.drag.curr = p; draw(); return;
+    }
+    if (S.drag.mode === "move") {
+      const dx = p.x - S.drag.start.x, dy = p.y - S.drag.start.y;
+      const [x1, y1, x2, y2] = S.drag.origin;
+      S.boxes[S.selected] = clamp([x1 + dx, y1 + dy, x2 + dx, y2 + dy]);
+      S.dirty = true; draw(); renderBoxes(); return;
+    }
+    if (S.drag.mode === "resize") {
+      let [x1, y1, x2, y2] = S.drag.origin;
+      const h = S.drag.handle;
+      if (h.includes("n")) y1 = p.y;
+      if (h.includes("s")) y2 = p.y;
+      if (h.includes("w")) x1 = p.x;
+      if (h.includes("e")) x2 = p.x;
+      S.boxes[S.selected] = clamp([x1, y1, x2, y2]);
+      S.dirty = true; draw(); renderBoxes();
+    }
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!S.drag) return;
+    if (S.drag.mode === "draw" && S.drag.curr) {
+      const a = S.drag.start, c = S.drag.curr;
+      const box = clamp([
+        Math.min(a.x, c.x), Math.min(a.y, c.y),
+        Math.max(a.x, c.x), Math.max(a.y, c.y),
+      ]);
+      if (box[2] - box[0] >= 4 && box[3] - box[1] >= 4) {
+        S.boxes.push(box);
+        S.selected = S.boxes.length - 1;
+        S.status = "done";
+        S.dirty = true;
+      }
+    }
+    S.drag = null; draw(); renderBoxes();
+  });
+
+  listEl.addEventListener("click", (e) => {
+    const row = e.target.closest(".item");
+    if (row) openIndex(Number(row.dataset.i));
+  });
+  boxesEl.addEventListener("click", (e) => {
+    const row = e.target.closest(".box-row[data-i]");
+    if (!row) return;
+    S.selected = Number(row.dataset.i);
+    renderBoxes(); draw();
+  });
+
+  document.getElementById("btnPrev").onclick = () => openIndex(S.index - 1);
+  document.getElementById("btnNext").onclick = () => openIndex(S.index + 1);
+  document.getElementById("btnSave").onclick = () => save();
+  document.getElementById("btnEmpty").onclick = () => save("empty");
+  document.getElementById("btnUnset").onclick = () => save("unset");
+  document.getElementById("btnDel").onclick = () => {
+    if (S.selected < 0) return;
+    S.boxes.splice(S.selected, 1);
+    S.selected = Math.min(S.selected, S.boxes.length - 1);
+    S.dirty = true; draw(); renderBoxes();
+  };
+
+  window.addEventListener("keydown", (evt) => {
+    if (evt.target.matches("input,textarea")) return;
+    const k = evt.key;
+    if (k === "a" || k === "A" || k === "ArrowLeft") { evt.preventDefault(); openIndex(S.index - 1); }
+    else if (k === "d" || k === "D" || k === "ArrowRight") { evt.preventDefault(); openIndex(S.index + 1); }
+    else if (k === "s" || k === "S") { evt.preventDefault(); save(); }
+    else if (k === "e" || k === "E") { evt.preventDefault(); save("empty"); }
+    else if (k === "u" || k === "U") { evt.preventDefault(); save("unset"); }
+    else if (k === "Delete" || k === "Backspace") {
+      evt.preventDefault();
+      document.getElementById("btnDel").click();
+    }
+  });
+
+  window.addEventListener("resize", fit);
+  loadList();
+})();
+</script>
+</body>
+</html>

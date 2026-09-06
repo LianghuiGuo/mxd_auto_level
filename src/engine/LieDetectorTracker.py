@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import time
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Protocol
 
 import cv2
 import numpy as np
@@ -48,7 +48,20 @@ class ShapeDetection:
     collective_residual: float = 0.0
     orientation: Optional[float] = None
     collective_rotation_residual: float = 0.0
+    yolo_confidence: float = 0.0
     contour: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+
+
+class ShapeCandidateDetector(Protocol):
+    """Optional learned detector interface; receives cursor-cleaned frames."""
+
+    def detect(
+        self,
+        frame_bgr: np.ndarray,
+        reference_radius: Optional[float] = None,
+    ) -> list[ShapeDetection]: ...
+
+    def reset(self) -> None: ...
 
 
 @dataclass
@@ -207,6 +220,7 @@ class LieDetectorTracker:
         max_lost_frames: int = 15,
         acquire_brightness: float = 205.0,
         hypothesis_count: int = 12,
+        candidate_detector: Optional[ShapeCandidateDetector] = None,
     ) -> None:
         self.min_radius = int(min_radius)
         self.max_radius = int(max_radius)
@@ -215,6 +229,7 @@ class LieDetectorTracker:
         self.max_lost_frames = int(max_lost_frames)
         self.acquire_brightness = float(acquire_brightness)
         self.hypothesis_count = max(1, int(hypothesis_count))
+        self.candidate_detector = candidate_detector
         self.reset()
 
     def reset(self) -> None:
@@ -233,6 +248,8 @@ class LieDetectorTracker:
         self.collective_delta = np.zeros(2, dtype=np.float64)
         self.collective_rotation_delta = 0.0
         self.collective_motion_votes = 0
+        if self.candidate_detector is not None:
+            self.candidate_detector.reset()
 
     @staticmethod
     def _remove_cursor(frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -434,6 +451,56 @@ class LieDetectorTracker:
             kept.append(det)
         return kept
 
+    def _fuse_learned_candidates(
+        self,
+        classical: list[ShapeDetection],
+        learned: list[ShapeDetection],
+    ) -> list[ShapeDetection]:
+        """Fuse YOLO boxes as evidence without losing classical recall.
+
+        The synthetic-only model currently misses some real shapes, so it must
+        not be used as a hard gate.  A nearby YOLO box annotates a classical
+        candidate; only strong unmatched boxes are allowed to create a new
+        candidate.
+        """
+
+        if not learned:
+            return classical
+        fused = list(classical)
+        matched_classical: set[int] = set()
+        for learned_detection in sorted(
+            learned, key=lambda item: item.yolo_confidence, reverse=True
+        ):
+            if classical:
+                distances = np.asarray(
+                    [
+                        np.linalg.norm(
+                            np.subtract(item.center, learned_detection.center)
+                        )
+                        for item in classical
+                    ]
+                )
+                index = int(np.argmin(distances))
+                gate = max(
+                    18.0,
+                    0.70
+                    * float(
+                        self.target_radius
+                        or classical[index].observed_radius
+                        or classical[index].radius
+                    ),
+                )
+                if distances[index] <= gate and index not in matched_classical:
+                    classical[index].yolo_confidence = max(
+                        classical[index].yolo_confidence,
+                        learned_detection.yolo_confidence,
+                    )
+                    matched_classical.add(index)
+                    continue
+            if learned_detection.yolo_confidence >= 0.10:
+                fused.append(learned_detection)
+        return self._deduplicate(fused, self.target_radius)
+
     def _annotate_collective_motion(
         self,
         detections: list[ShapeDetection],
@@ -449,7 +516,8 @@ class LieDetectorTracker:
         contour_detections = [
             detection
             for detection in detections
-            if detection.source == "contour" and detection.shape_distance <= 1.35
+            if detection.source in ("contour", "yolo")
+            and detection.shape_distance <= 1.35
         ]
         current = np.asarray(
             [detection.center for detection in contour_detections],
@@ -606,7 +674,7 @@ class LieDetectorTracker:
                 if distance <= gate and radius_delta <= max(30.0, pr * 0.75):
                     if track.id == self.target_id and self.target_kind == "contour":
                         if (
-                            detection.source == "contour"
+                            detection.source in ("contour", "yolo")
                             and detection.shape_distance > 1.0
                         ):
                             continue
@@ -614,10 +682,13 @@ class LieDetectorTracker:
                         80.0 * detection.shape_distance
                         if track.id == self.target_id
                         and self.target_kind == "contour"
-                        and detection.source == "contour"
+                        and detection.source in ("contour", "yolo")
                         else 0.0
                     )
-                    cost[row, col] = distance + 0.25 * radius_delta + shape_cost
+                    learned_bonus = 10.0 * detection.yolo_confidence
+                    cost[row, col] = (
+                        distance + 0.25 * radius_delta + shape_cost - learned_bonus
+                    )
 
         matched_tracks: set[int] = set()
         matched_detections: set[int] = set()
@@ -764,7 +835,8 @@ class LieDetectorTracker:
         contour_detections = [
             detection
             for detection in detections
-            if detection.source == "contour" and detection.shape_distance <= 1.35
+            if detection.source in ("contour", "yolo")
+            and detection.shape_distance <= 1.35
         ]
         branches: list[_TargetHypothesis] = []
         for hypothesis in self.target_hypotheses:
@@ -885,6 +957,9 @@ class LieDetectorTracker:
             if self.target_kind in (None, "circle")
             else self._contour_candidates(gray, self.target_contour)
         )
+        if self.candidate_detector is not None and self.target_kind is not None:
+            learned = self.candidate_detector.detect(cleaned, self.target_radius)
+            detections = self._fuse_learned_candidates(detections, learned)
         if self.target_kind == "contour" and initial_is_valid:
             detections.append(initial)
         if self.target_kind == "contour":

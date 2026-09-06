@@ -1,0 +1,26 @@
+{
+  "output": "/Users/bytedance/Downloads/project/mxd_auto_level/ml/lie_real_dataset",
+  "config": "/Users/bytedance/Downloads/project/mxd_auto_level/ml/lie_videos_config.json",
+  "videos_dir": "/Users/bytedance/Downloads/project/mxd_auto_level/ml/videos",
+  "train_videos": [
+    "测谎录屏1.mp4",
+    "测谎录屏10.mp4",
+    "测谎录屏2.mp4",
+    "测谎录屏3.mp4",
+    "测谎录屏5.mp4",
+    "测谎录屏6.mp4",
+    "测谎录屏7.mp4",
+    "测谎录屏8.mp4",
+    "测谎录屏9.mp4"
+  ],
+  "val_videos": [
+    "测谎录屏11.mp4",
+    "测谎录屏4.mp4"
+  ],
+  "train_frames": 559,
+  "val_frames": 105,
+  "train_boxes": 559,
+  "val_boxes": 105,
+  "used_yolo_auxiliary": false,
+  "note": "Pre-labels are NOT ground truth. Review in CVAT/Label Studio, then mix in via: python3 ml/build_lie_dataset_v2.py --reviewed-real /Users/bytedance/Downloads/project/mxd_auto_level/ml/lie_real_dataset"
+}

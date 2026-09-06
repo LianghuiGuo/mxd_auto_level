@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay and evaluate the classical lie-detector tracker on a recording."""
+"""Replay and evaluate the hybrid lie-detector tracker on a recording."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.engine.LieDetectorTracker import LieDetectorTracker, green_cursor_mask
+from src.engine.LieShapeYoloDetector import LieShapeYoloDetector
 
 
 def parse_roi(value: str) -> tuple[int, int, int, int]:
@@ -40,7 +41,10 @@ def cursor_ground_truth(frame_bgr: np.ndarray) -> tuple[float, float] | None:
         area = int(stats[index, cv2.CC_STAT_AREA])
         width = int(stats[index, cv2.CC_STAT_WIDTH])
         height = int(stats[index, cv2.CC_STAT_HEIGHT])
-        if 80 <= area <= 2500 and 10 <= width <= 80 and 10 <= height <= 80:
+        # The active target cursor is consistently a 34--40 px ring in the
+        # supplied 1280x720 recordings.  A broad green-component filter also
+        # picks up buttons and text after the panel closes, corrupting metrics.
+        if 620 <= area <= 1000 and 30 <= width <= 44 and 30 <= height <= 44:
             candidates.append((area, centroids[index]))
     if not candidates:
         return None
@@ -97,12 +101,15 @@ def draw_result(frame: np.ndarray, result, ground_truth, error) -> np.ndarray:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video", type=Path)
-    parser.add_argument("--roi", type=parse_roi, default=(418, 198, 1012, 676))
+    parser.add_argument("--roi", type=parse_roi, default=(290, 109, 700, 464))
     parser.add_argument("--start", type=float, default=0.0)
-    parser.add_argument("--end", type=float, default=13.5)
-    parser.add_argument("--eval-start", type=float, default=1.8)
-    parser.add_argument("--eval-end", type=float, default=12.8)
-    parser.add_argument("--inside-radius", type=float, default=60.0)
+    parser.add_argument("--end", type=float, default=float("inf"))
+    parser.add_argument("--eval-start", type=float, default=0.0)
+    parser.add_argument("--eval-end", type=float, default=float("inf"))
+    parser.add_argument("--inside-radius", type=float, default=40.0)
+    parser.add_argument("--model", type=Path, help="optional lie-shape YOLO weights")
+    parser.add_argument("--yolo-conf", type=float, default=0.01)
+    parser.add_argument("--yolo-stride", type=int, default=1)
     parser.add_argument("--output", type=Path, default=Path("log/lie_detector_replay.mp4"))
     parser.add_argument("--csv", type=Path, default=Path("log/lie_detector_replay.csv"))
     parser.add_argument("--no-video", action="store_true")
@@ -113,7 +120,16 @@ def main() -> int:
         parser.error(f"unable to open video: {args.video}")
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
     x, y, width, height = args.roi
-    tracker = LieDetectorTracker()
+    detector = (
+        LieShapeYoloDetector(
+            args.model,
+            confidence=args.yolo_conf,
+            inference_stride=args.yolo_stride,
+        )
+        if args.model is not None
+        else None
+    )
+    tracker = LieDetectorTracker(candidate_detector=detector)
     rows: list[dict[str, object]] = []
     errors: list[float] = []
     covered: list[bool] = []
@@ -155,14 +171,19 @@ def main() -> int:
         result = tracker.update(frame, timestamp)
         processing_ms.append((time.perf_counter() - started) * 1000.0)
         error = None
-        in_eval_window = args.eval_start <= timestamp <= args.eval_end
+        # A strict cursor component is the offline-only indication that the
+        # challenge is active.  It is never passed into the tracker.
+        in_eval_window = (
+            args.eval_start <= timestamp <= args.eval_end
+            and ground_truth is not None
+        )
         if in_eval_window:
             evaluated_frames += 1
             if result.acquired:
                 acquired_frames += 1
             if result.predicted_only:
                 predicted_only_frames += 1
-            if result.center is not None and ground_truth is not None:
+            if result.center is not None:
                 error = float(np.linalg.norm(np.subtract(result.center, ground_truth)))
                 errors.append(error)
                 covered.append(error <= args.inside_radius)
@@ -214,6 +235,9 @@ def main() -> int:
         "acquired_frame_ratio": acquired_frames / evaluated_frames if evaluated_frames else 0.0,
         "predicted_only_frame_ratio": predicted_only_frames / evaluated_frames if evaluated_frames else 0.0,
         "evaluated_error_frames": len(errors),
+        "prediction_coverage_ratio": (
+            len(errors) / evaluated_frames if evaluated_frames else 0.0
+        ),
         "mean_error_px": None if not errors else float(np.mean(errors)),
         "median_error_px": percentile(errors, 50),
         "p90_error_px": percentile(errors, 90),
@@ -223,6 +247,9 @@ def main() -> int:
         "within_40px_ratio": None if not errors else float(np.mean(np.array(errors) <= 40.0)),
         "within_50px_ratio": None if not errors else float(np.mean(np.array(errors) <= 50.0)),
         "within_radius_ratio": None if not covered else float(np.mean(covered)),
+        "within_radius_active_ratio": (
+            float(np.sum(covered)) / evaluated_frames if evaluated_frames else 0.0
+        ),
         "inside_radius_px": args.inside_radius,
         "mean_processing_ms": None if not processing_ms else float(np.mean(processing_ms)),
         "p95_processing_ms": percentile(processing_ms, 95),
