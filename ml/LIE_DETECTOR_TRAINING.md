@@ -360,8 +360,34 @@ python3 ml/build_lie_dataset_v2.py \
 已有 `lie_manual_dataset` 时，直接训，不必先生成合成数据。命令见 **§A.6**。
 
 ```bash
-python ml/train.py --lie-detector --data data_lie_manual.yaml --model yolo11n.pt --epochs 40 --batch 8 --name lie_shape_manual --out models/lie_shape_yolo_manual.pt
+python3 ml/train.py \
+  --lie-detector \
+  --data data_lie_manual.yaml \
+  --model yolo11n.pt \
+  --epochs 40 \
+  --batch 8 \
+  --name lie_shape_manual \
+  --out models/lie_shape_yolo_manual.pt
 ```
+
+训练完成后权重在 `models/lie_shape_yolo_manual.pt`。回放 / 评测工具默认已指向它，
+且 `LieShapeYoloDetector` 默认 `imgsz=768`、`conf=0.35`。跟踪融合里，未匹配 YOLO
+框需 `conf≥0.70` 才会新建候选（避免假阳性抢轨）；较低 conf 仍可用于给邻近的
+经典检测打分加权。
+
+```bash
+# 单段回放（ROI 从 ml/lie_videos_config.json 按文件名自动取）
+python3 tools/lie_detector_replay.py ml/videos/测谎录屏4.mp4
+
+# 只跑经典跟踪（对照）
+python3 tools/lie_detector_replay.py ml/videos/测谎录屏4.mp4 --no-yolo
+
+# val 两段（录屏4 + 录屏11）对比 classical vs hybrid
+python3 tools/evaluate_lie_detector_videos.py --split val
+```
+
+YOLO 只提供候选框；真目标仍由白态锁定 + `LieDetectorTracker` 跟踪。输入必须是
+面板 ROI 裁图，不要喂整屏。
 
 ### 3.2 合成 V2 模型
 

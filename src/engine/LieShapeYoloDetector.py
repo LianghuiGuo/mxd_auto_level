@@ -15,17 +15,24 @@ import numpy as np
 
 from src.engine.LieDetectorTracker import ShapeDetection
 
+# Manual bootstrap weights (``ml/lie_manual_dataset``).  Train with
+# ``--lie-detector`` uses imgsz=768; keep inference aligned.
+DEFAULT_WEIGHTS = Path("models/lie_shape_yolo_manual.pt")
+DEFAULT_IMAGE_SIZE = 768
+# Tracker fusion is YOLO-primary; keep the floor low enough for recall.
+DEFAULT_CONFIDENCE = 0.28
+
 
 class LieShapeYoloDetector:
     """Convert Ultralytics detections into tracker shape candidates."""
 
     def __init__(
         self,
-        weights: str | Path,
+        weights: str | Path | None = None,
         *,
-        confidence: float = 0.01,
+        confidence: float = DEFAULT_CONFIDENCE,
         iou: float = 0.55,
-        image_size: int = 640,
+        image_size: int = DEFAULT_IMAGE_SIZE,
         max_detections: int = 160,
         device: Optional[str] = None,
         inference_stride: int = 1,
@@ -37,7 +44,7 @@ class LieShapeYoloDetector:
                 "YOLO lie-shape detection requires the 'ultralytics' package"
             ) from exc
 
-        self.weights = Path(weights)
+        self.weights = Path(weights) if weights is not None else DEFAULT_WEIGHTS
         if not self.weights.is_file():
             raise FileNotFoundError(f"YOLO weights not found: {self.weights}")
         self.model = YOLO(str(self.weights))
@@ -90,25 +97,26 @@ class LieShapeYoloDetector:
             observed_radius = 0.25 * (box_width + box_height)
             if not 0.30 <= aspect <= 3.30:
                 continue
+            # Acquisition radius is often the bright core only; allow a wide
+            # band so full star boxes are not rejected.
             if reference_radius is not None and not (
-                0.48 * reference_radius
+                0.30 * reference_radius
                 <= observed_radius
-                <= 1.75 * reference_radius
+                <= 3.20 * reference_radius
             ):
                 continue
             cx = 0.5 * (x1 + x2)
             cy = 0.5 * (y1 + y2)
-            radius = float(reference_radius or observed_radius)
-            fixed_size = max(2, int(round(2.0 * radius)))
+            radius = float(observed_radius)
             detections.append(
                 ShapeDetection(
                     center=(cx, cy),
                     radius=radius,
                     bbox=(
-                        max(0, min(width - 1, int(round(cx - radius)))),
-                        max(0, min(height - 1, int(round(cy - radius)))),
-                        fixed_size,
-                        fixed_size,
+                        max(0, min(width - 1, int(round(x1)))),
+                        max(0, min(height - 1, int(round(y1)))),
+                        max(1, int(round(box_width))),
+                        max(1, int(round(box_height))),
                     ),
                     score=float(confidence),
                     source="yolo",

@@ -423,6 +423,30 @@ game_window:
   ratio_tolerance: 0.08        # 📐 Game window 16:9 tolerance
   title_bar_height: 59         # 📐 Title Bar Height (Note it's before window resize)
 
+lie_detector:
+  # Detect the lie-detector challenge, pause keyboard automation, move the
+  # pointer only while the tracked REAL shape is safe/actionable, then click
+  # the 确认 button of the success dialog once the panel closes.
+  enabled: true
+  model: "models/lie_shape_yolo_manual.pt"
+  confidence: 0.28
+  image_size: 768
+  inference_stride: 1
+  device: ""
+  # Validate distant REAL switches against accumulated continuous paths.
+  multi_hypothesis_identity: true
+  # Panel presence is proven by matching the 谎言探测仪 title text; the ROI
+  # estimator alone also fires on ordinary gameplay frames.
+  title_template: "misc/lie_detector_title_cn.png"
+  title_match_threshold: 0.70
+  panel_confirm_frames: 2
+  panel_miss_frames: 3
+  max_pointer_jump: 160
+  # Success dialog (确认 button) handling after the panel closes.
+  confirm_wait_seconds: 12.0
+  confirm_click_interval: 0.8
+  confirm_max_clicks: 6
+
 email:
   # 📩 Email
   # Send email to notify user

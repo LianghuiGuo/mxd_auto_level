@@ -1,22 +1,15 @@
-"""Classical computer-vision tracker for the lie-detector mini-game.
+"""Constellation tracker for the MapleStory lie-detector mini-game.
 
-The tracker deliberately does not move the mouse.  It consumes an already
-cropped mini-game frame and returns a target point that a caller may visualize
-or, in an explicitly enabled test environment, pass to an input controller.
+Design (aligned with the working third-party overlay):
 
-The implementation follows the classical detection/tracking pipeline:
+* detect every visible star each frame (YOLO primary);
+* keep a track for **every** star (BG:id), not only the target;
+* seed REAL from the opening white highlight;
+* after fade, score REAL by four cues: self-rotation, BG layout rigidity,
+  BG speed consistency, and translation-direction disagreement with BG;
+* emit the REAL center for the caller; never use the green cursor as input.
 
-* acquire the initially opaque target from a low-saturation bright mask;
-* detect all shape candidates with OpenCV (Hough circles for circular targets,
-  contour candidates otherwise);
-* predict every track with a Kalman filter;
-* associate detections to tracks with the Hungarian algorithm;
-* retain the ID selected during acquisition when the target fades;
-* for non-circular targets, keep a small beam of motion/shape hypotheses so a
-  single missed contour or ambiguous decoy cannot permanently switch the ID.
-
-The green in-game cursor is removed before feature extraction.  Its position is
-never used as a target measurement.
+The tracker itself does not move the mouse.
 """
 
 from __future__ import annotations
@@ -24,15 +17,70 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import time
-from typing import Iterable, Optional, Protocol
+from typing import Iterable, Literal, Optional, Protocol
 
 import cv2
 import numpy as np
 
 try:
     from scipy.optimize import linear_sum_assignment
-except ImportError:  # pragma: no cover - exercised only on minimal installs
+except ImportError:  # pragma: no cover
     linear_sum_assignment = None
+
+MAX_PATTERN_COUNT = 20
+_DECOY_ROTATION_WEIGHT = 1.35
+_MATCH_GATE = 55.0
+_REAL_STICKY_BONUS = 18.0
+_REAL_SWITCH_MARGIN = 10.0
+_REAL_COAST_GRACE = 10
+_REAL_OUTLIER_RATIO = 1.8
+_ORIENT_HISTORY = 5
+_ROTATION_ANGLE_BINS = 360
+_ROTATION_RADIUS_BINS = 32
+_MAX_ROTATION_DEGREES_PER_FRAME = 22.0
+_FULL_ROTATION_SPEED_DEG_PER_SECOND = 120.0
+_MAX_ROTATION_SCORE = 20.0
+_MAX_LOST_DEFAULT = 20
+# REAL may coast through short occlusions, but never indefinitely: past this
+# budget the label is released so a live track can be re-acquired.
+_REAL_MAX_COAST = 25
+# A coasting centre allowed to sit this far outside the panel before the track
+# is discarded instead of extrapolating off-screen forever.
+_FRAME_EXIT_MARGIN = 6.0
+# Border band (also scaled by the shape radius) where an outward-moving track
+# is not allowed to become REAL.
+_EDGE_SWITCH_MARGIN = 12.0
+# Four-cue REAL score weights (leave-one-out over BG tracks).
+_W_ROTATION = 1.60
+_W_DIRECTION = 1.40
+_W_SPEED = 1.10
+_W_RIGIDITY = 2.20
+_W_TRANSLATION = 0.45
+_MIN_HEADING_SPEED = 0.8
+_CHALLENGER_EVIDENCE_DECAY = 0.78
+_CHALLENGER_EVIDENCE_NEEDED = 4.0
+_WEAK_REAL_EVIDENCE_NEEDED = 2.0
+_W_ANCHOR_APPEARANCE = 12.0
+_SHADOW_SWITCH_WINDOW = 5
+_SHADOW_SWITCH_VOTES = 3
+_PROVISIONAL_GAP_FRAMES = 8
+_PROVISIONAL_OBSERVATIONS = 4
+_IDENTITY_PATH_DECAY = 0.86
+_IDENTITY_EMISSION_CLIP = 3.0
+_IDENTITY_HANDOFF_GATE = 105.0
+_IDENTITY_HANDOFF_PENALTY = 0.8
+_IDENTITY_HANDOFF_DISTANCE_WEIGHT = 1.4
+_IDENTITY_MISSING_PENALTY = 0.4
+_IDENTITY_MAX_MISSING = 10
+_IDENTITY_SWITCH_MARGIN = 1.2
+_IDENTITY_SWITCH_VOTES = 3
+_IDENTITY_FAR_SWITCH_EXTRA_VOTES = 3
+_IDENTITY_FAR_SWITCH_DISTANCE = 130.0
+_IDENTITY_UNVALIDATED_RECOVERY_VOTES = 4
+_IDENTITY_EXTREME_RECOVERY_DISTANCE = 400.0
+_IDENTITY_EXTREME_RECOVERY_VOTES = 2
+_IDENTITY_SWITCH_COOLDOWN = 10
+TrackRole = Literal["real", "bg", "unknown"]
 
 
 @dataclass
@@ -47,14 +95,17 @@ class ShapeDetection:
     observed_radius: Optional[float] = None
     collective_residual: float = 0.0
     orientation: Optional[float] = None
+    orientation_confidence: float = 0.0
     collective_rotation_residual: float = 0.0
     yolo_confidence: float = 0.0
     contour: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    appearance: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    rotation_descriptor: Optional[np.ndarray] = field(
+        default=None, repr=False, compare=False
+    )
 
 
 class ShapeCandidateDetector(Protocol):
-    """Optional learned detector interface; receives cursor-cleaned frames."""
-
     def detect(
         self,
         frame_bgr: np.ndarray,
@@ -62,6 +113,27 @@ class ShapeCandidateDetector(Protocol):
     ) -> list[ShapeDetection]: ...
 
     def reset(self) -> None: ...
+
+
+@dataclass
+class ConstellationTrackView:
+    track_id: int
+    center: tuple[float, float]
+    radius: float
+    role: TrackRole
+    orientation: Optional[float]
+    lost_frames: int
+    translation_residual: float = 0.0
+    rotation_residual: float = 0.0
+    # Per-frame motion estimate used for direction prediction arrows.
+    velocity: tuple[float, float] = (0.0, 0.0)
+    real_score: float = 0.0
+    rotation_score: float = 0.0
+    direction_score: float = 0.0
+    speed_score: float = 0.0
+    rigidity_score: float = 0.0
+    motion_reliability: float = 0.0
+    visible_streak: int = 0
 
 
 @dataclass
@@ -80,39 +152,34 @@ class LieDetectorTrackingResult:
     collective_promoted: bool = False
     collective_delta: tuple[float, float] = (0.0, 0.0)
     collective_rotation_degrees: float = 0.0
+    white_active: bool = False
+    identity_window_active: bool = False
+    identity_switched: bool = False
+    actionable: bool = False
+    position_uncertainty_px: float = 0.0
+    constellation: list[ConstellationTrackView] = field(default_factory=list)
 
 
 @dataclass
-class _TargetHypothesis:
-    """One branch in the contour target's bounded multi-hypothesis tracker."""
+class _PendingReassociation:
+    old_track_id: int
+    child_track_id: int
+    initial_signature: Optional[np.ndarray]
+    initial_position_error: float
 
-    center: np.ndarray
-    velocity: np.ndarray
+
+@dataclass
+class _IdentityHypothesis:
+    track_id: int
+    score: float
+    center: tuple[float, float]
     radius: float
-    radius_velocity: float
-    cost: float
-    missed: int
-    age: int
-    last_timestamp: float
-    predicted_only: bool
-    group_evidence: float = 0.0
-    last_collective_residual: float = 0.0
-
-    def predict(self, timestamp: float) -> tuple[np.ndarray, float, float]:
-        dt = float(np.clip(timestamp - self.last_timestamp, 1.0 / 120.0, 0.25))
-        center = self.center + self.velocity * dt
-        radius = max(1.0, self.radius + self.radius_velocity * dt)
-        return center, radius, dt
+    age: int = 1
+    missing: int = 0
+    handoffs: int = 0
 
 
 def green_cursor_mask(frame_bgr: np.ndarray) -> np.ndarray:
-    """Return a mask for the vivid green lie-detector cursor.
-
-    This is used only to stop the cursor graphic from becoming a contour or a
-    Hough circle.  The cursor centroid is intentionally not exposed to the
-    tracker.
-    """
-
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(
         hsv,
@@ -127,10 +194,9 @@ def green_cursor_mask(frame_bgr: np.ndarray) -> np.ndarray:
 
 
 class _ShapeTrack:
-    """One six-state Kalman track: x, y, vx, vy, radius, radius velocity."""
-
     def __init__(self, track_id: int, detection: ShapeDetection, timestamp: float):
         self.id = track_id
+        self.role: TrackRole = "unknown"
         self.kf = cv2.KalmanFilter(6, 3)
         self.kf.measurementMatrix = np.array(
             [[1, 0, 0, 0, 0, 0],
@@ -141,11 +207,9 @@ class _ShapeTrack:
         self.kf.processNoiseCov = np.diag(
             [1.0, 1.0, 20.0, 20.0, 1.0, 5.0]
         ).astype(np.float32)
-        self.kf.measurementNoiseCov = np.diag([15.0, 15.0, 9.0]).astype(
-            np.float32
-        )
+        self.kf.measurementNoiseCov = np.diag([12.0, 12.0, 8.0]).astype(np.float32)
         self.kf.errorCovPost = np.diag(
-            [10.0, 10.0, 100.0, 100.0, 10.0, 20.0]
+            [8.0, 8.0, 80.0, 80.0, 8.0, 16.0]
         ).astype(np.float32)
         x, y = detection.center
         self.kf.statePost = np.array(
@@ -155,12 +219,54 @@ class _ShapeTrack:
         self.last_timestamp = timestamp
         self.age = 1
         self.hits = 1
+        self.visible_streak = 1
         self.lost_frames = 0
         self.last_detection = detection
         self.predicted_only = False
+        self.rotation_descriptor = (
+            None
+            if detection.rotation_descriptor is None
+            else detection.rotation_descriptor.astype(np.float32, copy=True)
+        )
+        self.orientation = (
+            detection.orientation
+            if detection.orientation is not None
+            else (0.0 if self.rotation_descriptor is not None else None)
+        )
+        self.orientation_phase = self.orientation
+        self.orientation_history: list[float] = (
+            [] if self.orientation is None else [float(self.orientation)]
+        )
+        self.orientation_quality_history: list[float] = (
+            []
+            if self.orientation is None
+            else [float(detection.orientation_confidence or 1.0)]
+        )
+        self.rotation_delta_history: list[float] = []
+        self.rotation_dt_history: list[float] = []
+        self.angular_velocity = 0.0
+        self.appearance = (
+            None
+            if detection.appearance is None
+            else detection.appearance.astype(np.float32, copy=True)
+        )
+        self.translation_residual = 0.0
+        self.rotation_residual = 0.0
+        self.real_score = 0.0
+        self.prev_center: Optional[tuple[float, float]] = None
+        self.velocity: tuple[float, float] = (0.0, 0.0)
+        self.motion_history: list[tuple[float, float]] = []
+        self.association_quality_history: list[float] = [0.0]
+        self.last_dt = 1.0 / 30.0
+        self.rotation_score = 0.0
+        self.direction_score = 0.0
+        self.speed_score = 0.0
+        self.rigidity_score = 0.0
+        self.appearance_score = 0.0
 
     def _set_transition(self, dt: float) -> None:
         dt = float(np.clip(dt, 1.0 / 120.0, 0.25))
+        self.last_dt = dt
         self.kf.transitionMatrix = np.array(
             [[1, 0, dt, 0, 0, 0],
              [0, 1, 0, dt, 0, 0],
@@ -183,32 +289,163 @@ class _ShapeTrack:
         self,
         detection: ShapeDetection,
         timestamp: float,
-    ) -> tuple[float, float, float]:
+        *,
+        association_quality: float = 1.0,
+    ) -> None:
+        if self.last_detection is not None:
+            self.prev_center = (
+                float(self.last_detection.center[0]),
+                float(self.last_detection.center[1]),
+            )
+            self.velocity = (
+                float(detection.center[0] - self.prev_center[0]),
+                float(detection.center[1] - self.prev_center[1]),
+            )
+            self.motion_history.append(self.velocity)
+            if len(self.motion_history) > 7:
+                self.motion_history = self.motion_history[-7:]
         measurement = np.array(
             [[detection.center[0]], [detection.center[1]], [detection.radius]],
             dtype=np.float32,
         )
-        state = self.kf.correct(measurement).reshape(-1)
+        self.kf.correct(measurement)
         self.last_detection = detection
         self.hits += 1
+        self.visible_streak += 1
         self.lost_frames = 0
         self.predicted_only = False
-        return float(state[0]), float(state[1]), max(1.0, float(state[4]))
+        self.association_quality_history.append(
+            float(np.clip(association_quality, 0.0, 1.0))
+        )
+        if len(self.association_quality_history) > 5:
+            self.association_quality_history = self.association_quality_history[-5:]
+        self.last_timestamp = timestamp
+        if detection.appearance is not None:
+            incoming = detection.appearance.astype(np.float32, copy=False)
+            if self.appearance is None or self.appearance.shape != incoming.shape:
+                self.appearance = incoming.copy()
+            else:
+                updated = 0.85 * self.appearance + 0.15 * incoming
+                norm = float(np.linalg.norm(updated))
+                self.appearance = updated / norm if norm > 1e-6 else updated
+        rotation_delta: Optional[float] = None
+        rotation_quality = 0.0
+        incoming_rotation = detection.rotation_descriptor
+        if incoming_rotation is not None and self.rotation_descriptor is not None:
+            predicted_delta = self.angular_velocity * self.last_dt
+            rotation_delta, rotation_quality = (
+                LieDetectorTracker._match_rotation_descriptors(
+                    self.rotation_descriptor,
+                    incoming_rotation,
+                    predicted_delta=predicted_delta,
+                )
+            )
+        elif detection.orientation is not None:
+            # Compatibility path for classical/synthetic detections carrying an
+            # explicit full-turn angle. Real detections use descriptor matching.
+            measured = float(detection.orientation)
+            if self.orientation_phase is None:
+                self.orientation_phase = measured
+            else:
+                rotation_delta = (
+                    measured - float(self.orientation_phase) + math.pi
+                ) % (2.0 * math.pi) - math.pi
+                rotation_quality = float(detection.orientation_confidence or 1.0)
+
+        if incoming_rotation is not None:
+            self.rotation_descriptor = incoming_rotation.astype(
+                np.float32, copy=True
+            )
+        if rotation_delta is not None:
+            self.orientation_phase = float(self.orientation_phase or 0.0) + rotation_delta
+            measured_velocity = rotation_delta / max(self.last_dt, 1e-6)
+            self.angular_velocity = (
+                0.65 * self.angular_velocity + 0.35 * measured_velocity
+            )
+            self.orientation = float(self.orientation_phase)
+            self.orientation_history.append(float(self.orientation_phase))
+            self.rotation_delta_history.append(float(rotation_delta))
+            self.rotation_dt_history.append(float(self.last_dt))
+            self.orientation_quality_history.append(float(rotation_quality))
+            detection.orientation = float(self.orientation_phase)
+            detection.orientation_confidence = float(rotation_quality)
+        elif incoming_rotation is not None:
+            # Preserve a failed measurement in the reliability window so that
+            # intermittent texture/occlusion cannot produce a high spin score.
+            self.rotation_delta_history.append(0.0)
+            self.rotation_dt_history.append(float(self.last_dt))
+            self.orientation_quality_history.append(0.0)
+
+        if len(self.orientation_history) > _ORIENT_HISTORY:
+            self.orientation_history = self.orientation_history[-_ORIENT_HISTORY:]
+        if len(self.rotation_delta_history) > _ORIENT_HISTORY - 1:
+            self.rotation_delta_history = self.rotation_delta_history[
+                -(_ORIENT_HISTORY - 1):
+            ]
+            self.rotation_dt_history = self.rotation_dt_history[
+                -(_ORIENT_HISTORY - 1):
+            ]
+        if len(self.orientation_quality_history) > _ORIENT_HISTORY:
+            self.orientation_quality_history = self.orientation_quality_history[
+                -_ORIENT_HISTORY:
+            ]
 
     def mark_missed(self) -> None:
         self.lost_frames += 1
+        self.visible_streak = 0
 
     @property
     def state(self) -> tuple[float, float, float]:
-        # statePre is the current frame's estimate while a track is coasting;
-        # statePost is the corrected estimate after a matched detection.
         state = self.kf.statePre if self.predicted_only else self.kf.statePost
         s = state.reshape(-1)
         return float(s[0]), float(s[1]), max(1.0, float(s[4]))
 
+    @property
+    def predicted_velocity(self) -> tuple[float, float]:
+        """Per-frame motion estimate.
+
+        The Kalman state carries px/second (the transition matrix uses a
+        seconds-based dt), while ``velocity`` is a raw per-frame centre
+        displacement.  Both are reported in px/frame here so callers never mix
+        the two scales.
+        """
+        state = self.kf.statePre if self.predicted_only else self.kf.statePost
+        s = state.reshape(-1)
+        vx = float(s[2]) * self.last_dt
+        vy = float(s[3]) * self.last_dt
+        if abs(vx) < 1e-3 and abs(vy) < 1e-3:
+            return self.velocity
+        return vx, vy
+
+    @property
+    def robust_velocity(self) -> tuple[float, float]:
+        if not self.motion_history:
+            return self.velocity
+        recent = np.asarray(self.motion_history[-5:], dtype=np.float64)
+        median = np.median(recent, axis=0)
+        return float(median[0]), float(median[1])
+
+    @property
+    def motion_reliability(self) -> float:
+        maturity = float(np.clip((self.visible_streak - 2) / 4.0, 0.0, 1.0))
+        qualities = self.association_quality_history[-3:]
+        association = float(np.median(np.asarray(qualities))) if qualities else 0.0
+        return maturity * association
+
+    @property
+    def position_uncertainty(self) -> float:
+        covariance = (
+            self.kf.errorCovPre if self.predicted_only else self.kf.errorCovPost
+        )
+        variance = max(
+            0.0,
+            0.5 * float(covariance[0, 0] + covariance[1, 1]),
+        )
+        return float(math.sqrt(variance))
+
 
 class LieDetectorTracker:
-    """Track the initially highlighted shape among moving decoys."""
+    """Track every star; label one as REAL via constellation geometry."""
 
     def __init__(
         self,
@@ -216,11 +453,15 @@ class LieDetectorTracker:
         min_radius: int = 35,
         max_radius: int = 90,
         hough_param2: float = 30.0,
-        max_match_distance: float = 55.0,
-        max_lost_frames: int = 15,
+        max_match_distance: float = _MATCH_GATE,
+        max_lost_frames: int = _MAX_LOST_DEFAULT,
         acquire_brightness: float = 205.0,
         hypothesis_count: int = 12,
         candidate_detector: Optional[ShapeCandidateDetector] = None,
+        classical_candidates: Optional[bool] = None,
+        shadow_switch: bool = False,
+        provisional_reassociation: bool = False,
+        multi_hypothesis_identity: bool = False,
     ) -> None:
         self.min_radius = int(min_radius)
         self.max_radius = int(max_radius)
@@ -230,24 +471,53 @@ class LieDetectorTracker:
         self.acquire_brightness = float(acquire_brightness)
         self.hypothesis_count = max(1, int(hypothesis_count))
         self.candidate_detector = candidate_detector
+        self.classical_candidates = (
+            candidate_detector is None
+            if classical_candidates is None
+            else bool(classical_candidates)
+        )
+        self.shadow_switch_enabled = bool(shadow_switch)
+        self.provisional_reassociation_enabled = bool(provisional_reassociation)
+        self.multi_hypothesis_identity_enabled = bool(
+            multi_hypothesis_identity
+        )
         self.reset()
 
     def reset(self) -> None:
+        self.contamination_streak = 0
+        self.contamination_candidate = None
+        self.last_outlier_real_xy = None
         self.tracks: dict[int, _ShapeTrack] = {}
         self.target_id: Optional[int] = None
         self.target_kind: Optional[str] = None
         self.target_contour: Optional[np.ndarray] = None
         self.target_radius: Optional[float] = None
+        self.target_appearance_anchor: Optional[np.ndarray] = None
         self.next_track_id = 1
-        self.last_timestamp: Optional[float] = None
-        self.target_hypotheses: list[_TargetHypothesis] = []
-        self.target_recovery_active = False
-        self.target_recovery_stable_frames = 0
-        self.previous_contour_centers: Optional[np.ndarray] = None
-        self.previous_contour_orientations: Optional[np.ndarray] = None
         self.collective_delta = np.zeros(2, dtype=np.float64)
-        self.collective_rotation_delta = 0.0
-        self.collective_motion_votes = 0
+        self.previous_centers: Optional[np.ndarray] = None
+        self.previous_orientations: Optional[np.ndarray] = None
+        self.frame_size: Optional[tuple[int, int]] = None
+        self.white_seen = False
+        self.white_active = False
+        self.white_absent_streak = 0
+        self.white_phase_completed = False
+        self.identity_switched = False
+        self.contamination_streak = 0
+        self.contamination_candidate: Optional[int] = None
+        self.challenger_evidence: dict[int, float] = {}
+        self.shadow_candidate_id: Optional[int] = None
+        self.shadow_candidate_votes: list[bool] = []
+        self.pending_reassociation: Optional[_PendingReassociation] = None
+        self.reassociation_cooldown = 0
+        self.target_hypotheses: dict[int, _IdentityHypothesis] = {}
+        self.identity_path_candidate_id: Optional[int] = None
+        self.identity_path_candidate_streak = 0
+        self.identity_path_recommended_id: Optional[int] = None
+        self.identity_switch_cooldown = 0
+        self.identity_unvalidated_candidate_id: Optional[int] = None
+        self.identity_unvalidated_candidate_streak = 0
+        self.identity_unvalidated_center: Optional[tuple[float, float]] = None
         if self.candidate_detector is not None:
             self.candidate_detector.reset()
 
@@ -255,17 +525,233 @@ class LieDetectorTracker:
     def _remove_cursor(frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mask = green_cursor_mask(frame_bgr)
         expanded = cv2.dilate(
-            mask,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)),
+            mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
         )
         cleaned = cv2.inpaint(frame_bgr, expanded, 5, cv2.INPAINT_TELEA)
         return cleaned, mask
 
     @staticmethod
-    def _initial_bright_shape(gray: np.ndarray, hsv: np.ndarray) -> Optional[ShapeDetection]:
-        mask = np.where(
-            (gray >= 210) & (hsv[:, :, 1] <= 75), 255, 0
-        ).astype(np.uint8)
+    def _angle_delta_degrees(a: float, b: float) -> float:
+        residual = (a - b + math.pi) % (2.0 * math.pi) - math.pi
+        return abs(math.degrees(float(residual)))
+
+    @staticmethod
+    def _rotation_motion_score(
+        deltas: list[float],
+        dts: list[float],
+        qualities: list[float],
+    ) -> float:
+        """Confidence-weighted sustained angular speed for an arbitrary shape."""
+        count = min(len(deltas), len(dts), len(qualities))
+        if count < 2:
+            return 0.0
+        delta_values = np.asarray(deltas[-count:], dtype=np.float64)
+        dt_values = np.maximum(
+            np.asarray(dts[-count:], dtype=np.float64), 1.0 / 120.0
+        )
+        quality_values = np.clip(
+            np.asarray(qualities[-count:], dtype=np.float64), 0.0, 1.0
+        )
+        valid = quality_values > 0.0
+        if np.count_nonzero(valid) < 2:
+            return 0.0
+
+        angular_speeds = np.degrees(delta_values[valid] / dt_values[valid])
+        valid_quality = quality_values[valid]
+        order = np.argsort(angular_speeds)
+        ordered_speeds = angular_speeds[order]
+        ordered_quality = valid_quality[order]
+        midpoint = 0.5 * float(np.sum(ordered_quality))
+        median_index = int(
+            np.searchsorted(np.cumsum(ordered_quality), midpoint, side="left")
+        )
+        robust_speed = float(
+            ordered_speeds[min(median_index, len(ordered_speeds) - 1)]
+        )
+        direction_consistency = abs(
+            float(np.sum(valid_quality * np.sign(angular_speeds)))
+        ) / max(float(np.sum(valid_quality)), 1e-6)
+        reliability = (
+            float(np.median(valid_quality))
+            * direction_consistency
+            * float(np.count_nonzero(valid)) / count
+        )
+        normalized_speed = min(
+            1.0, abs(robust_speed) / _FULL_ROTATION_SPEED_DEG_PER_SECOND
+        )
+        return float(_MAX_ROTATION_SCORE * normalized_speed * reliability)
+
+    @staticmethod
+    def _rotation_edge_map(gray: np.ndarray) -> np.ndarray:
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0.8)
+        grad_x = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
+        return cv2.magnitude(grad_x, grad_y)
+
+    @staticmethod
+    def _rotation_descriptor(
+        edge_magnitude: np.ndarray, detection: ShapeDetection
+    ) -> Optional[np.ndarray]:
+        """Polar edge signature whose angular shift measures frame-to-frame spin."""
+        cx, cy = detection.center
+        _, _, width, height = detection.bbox
+        sample_radius = max(8.0, 0.55 * max(float(width), float(height)))
+        side = max(16, int(round(2.0 * sample_radius)))
+        if side < 16:
+            return None
+        patch = cv2.getRectSubPix(
+            edge_magnitude, (side, side), (float(cx), float(cy))
+        )
+        if patch is None or patch.size == 0:
+            return None
+        magnitude = cv2.resize(
+            patch, (96, 96), interpolation=cv2.INTER_AREA
+        )
+        polar = cv2.warpPolar(
+            magnitude,
+            (_ROTATION_RADIUS_BINS, _ROTATION_ANGLE_BINS),
+            (47.5, 47.5),
+            47.0,
+            cv2.WARP_POLAR_LINEAR | cv2.WARP_FILL_OUTLIERS,
+        ).astype(np.float32)
+        polar[:, :5] = 0.0
+        floor = float(np.percentile(polar, 45.0))
+        polar = np.maximum(polar - floor, 0.0)
+        radial_position = np.linspace(
+            0.0, 1.0, _ROTATION_RADIUS_BINS, dtype=np.float32
+        )
+        radial_weight = np.exp(
+            -0.5 * ((radial_position - 0.72) / 0.30) ** 2
+        )
+        polar *= radial_weight[None, :]
+        raw_norm = float(np.linalg.norm(polar))
+        if raw_norm <= 1e-5:
+            return None
+        # Remove rotationally invariant rings. A circle becomes nearly zero,
+        # while corners and arbitrary boundary/texture details remain.
+        polar -= np.mean(polar, axis=0, keepdims=True)
+        angular_norm = float(np.linalg.norm(polar))
+        if angular_norm / raw_norm < 0.45:
+            return None
+        return polar / angular_norm
+
+    @staticmethod
+    def _match_rotation_descriptors(
+        previous: np.ndarray,
+        current: np.ndarray,
+        *,
+        predicted_delta: float = 0.0,
+    ) -> tuple[Optional[float], float]:
+        """Match two polar signatures inside the physically plausible window."""
+        if previous.shape != current.shape or previous.ndim != 2:
+            return None, 0.0
+        degrees_per_bin = 360.0 / previous.shape[0]
+        max_shift = max(
+            1,
+            int(round(_MAX_ROTATION_DEGREES_PER_FRAME / degrees_per_bin)),
+        )
+        shifts = np.arange(-max_shift, max_shift + 1, dtype=np.int32)
+        correlations = np.asarray(
+            [
+                float(np.sum(previous * np.roll(current, int(shift), axis=0)))
+                for shift in shifts
+            ],
+            dtype=np.float64,
+        )
+        # A weak temporal prior resolves equal peaks from symmetric polygons
+        # without overpowering actual image evidence.
+        delta_candidates = -np.radians(shifts * degrees_per_bin)
+        prior_distance = np.abs(delta_candidates - float(predicted_delta))
+        objective = correlations - 0.015 * np.clip(
+            prior_distance / math.radians(_MAX_ROTATION_DEGREES_PER_FRAME),
+            0.0,
+            1.0,
+        )
+        best_index = int(np.argmax(objective))
+        best_correlation = float(correlations[best_index])
+        if best_correlation < 0.25:
+            return None, 0.0
+        exclusion = max(2, int(round(5.0 / degrees_per_bin)))
+        alternatives = np.ones(len(correlations), dtype=bool)
+        alternatives[
+            max(0, best_index - exclusion) : min(
+                len(correlations), best_index + exclusion + 1
+            )
+        ] = False
+        second_correlation = (
+            float(np.max(correlations[alternatives]))
+            if np.any(alternatives)
+            else -1.0
+        )
+        peak_strength = float(
+            np.clip((best_correlation - 0.25) / 0.65, 0.0, 1.0)
+        )
+        peak_uniqueness = float(
+            np.clip((best_correlation - second_correlation) / 0.10, 0.0, 1.0)
+        )
+        confidence = peak_strength * peak_uniqueness
+        if confidence < 0.05:
+            return None, 0.0
+        refined_shift = float(shifts[best_index])
+        if 0 < best_index < len(correlations) - 1:
+            left = float(correlations[best_index - 1])
+            center = float(correlations[best_index])
+            right = float(correlations[best_index + 1])
+            curvature = left - 2.0 * center + right
+            if curvature < -1e-6:
+                refined_shift += float(
+                    np.clip(0.5 * (left - right) / curvature, -1.0, 1.0)
+                )
+        refined_delta = -math.radians(refined_shift * degrees_per_bin)
+        return float(refined_delta), float(confidence)
+
+    @staticmethod
+    def _appearance_descriptor(
+        gray: np.ndarray, detection: ShapeDetection
+    ) -> Optional[np.ndarray]:
+        """Rotation/translation-tolerant frequency signature of a YOLO crop."""
+        x, y, width, height = detection.bbox
+        x0 = max(0, x)
+        y0 = max(0, y)
+        x1 = min(gray.shape[1], x + width)
+        y1 = min(gray.shape[0], y + height)
+        if x1 - x0 < 12 or y1 - y0 < 12:
+            return None
+        patch = cv2.resize(
+            gray[y0:y1, x0:x1],
+            (40, 40),
+            interpolation=cv2.INTER_AREA,
+        ).astype(np.float32)
+        patch = (patch - float(np.mean(patch))) / (
+            float(np.std(patch)) + 1e-5
+        )
+        patch *= np.outer(np.hanning(40), np.hanning(40)).astype(np.float32)
+        spectrum = np.abs(np.fft.fftshift(np.fft.fft2(patch)))
+        grid_y, grid_x = np.indices(spectrum.shape, dtype=np.float32)
+        radius = np.sqrt((grid_x - 19.5) ** 2 + (grid_y - 19.5) ** 2)
+        radial: list[float] = []
+        # Radial pooling makes the signature insensitive to the REAL star's
+        # self-rotation while retaining its texture-frequency distribution.
+        for low, high in zip(np.linspace(1.0, 18.0, 10)[:-1], np.linspace(1.0, 18.0, 10)[1:]):
+            values = spectrum[(radius >= low) & (radius < high)]
+            radial.extend(
+                (
+                    float(np.mean(values)),
+                    float(np.std(values)),
+                    float(np.percentile(values, 75.0)),
+                )
+            )
+        descriptor = np.log1p(np.asarray(radial, dtype=np.float32))
+        norm = float(np.linalg.norm(descriptor))
+        if norm <= 1e-6:
+            return None
+        return descriptor / norm
+
+    @staticmethod
+    def _initial_bright_shape(
+        gray: np.ndarray, hsv: np.ndarray
+    ) -> Optional[ShapeDetection]:
+        mask = np.where((gray >= 210) & (hsv[:, :, 1] <= 75), 255, 0).astype(np.uint8)
         mask = cv2.morphologyEx(
             mask,
             cv2.MORPH_CLOSE,
@@ -280,26 +766,33 @@ class LieDetectorTracker:
                 continue
             aspect = w / max(1.0, float(h))
             perimeter = float(cv2.arcLength(contour, True))
-            circularity = 0.0 if perimeter <= 0 else 4.0 * math.pi * area / (perimeter * perimeter)
-            component_mask = np.zeros_like(gray)
-            cv2.drawContours(component_mask, [contour], -1, 255, -1)
-            mean_brightness = float(cv2.mean(gray, mask=component_mask)[0])
-            compactness_penalty = abs(math.log(max(aspect, 1e-3))) * 25.0
-            rank = mean_brightness + circularity * 45.0 - compactness_penalty
+            circularity = (
+                0.0
+                if perimeter <= 0
+                else 4.0 * math.pi * area / (perimeter * perimeter)
+            )
+            component = np.zeros_like(gray)
+            cv2.drawContours(component, [contour], -1, 255, -1)
+            mean_brightness = float(cv2.mean(gray, mask=component)[0])
+            rank = (
+                mean_brightness
+                + circularity * 45.0
+                - abs(math.log(max(aspect, 1e-3))) * 25.0
+            )
             moments = cv2.moments(contour)
             if moments["m00"]:
                 cx = moments["m10"] / moments["m00"]
                 cy = moments["m01"] / moments["m00"]
             else:
                 cx, cy = x + w / 2.0, y + h / 2.0
-            radius = 0.25 * (w + h)
             det = ShapeDetection(
                 center=(float(cx), float(cy)),
-                radius=float(radius),
+                radius=float(0.25 * (w + h)),
                 bbox=(x, y, w, h),
                 score=mean_brightness / 255.0,
                 circularity=float(circularity),
                 source="bright",
+                observed_radius=float(0.25 * (w + h)),
                 contour=contour.copy(),
             )
             if best is None or rank > best[0]:
@@ -336,6 +829,7 @@ class LieDetectorTracker:
                     score=1.0,
                     circularity=1.0,
                     source="hough_circle",
+                    observed_radius=r,
                 )
             )
         return detections
@@ -363,65 +857,38 @@ class LieDetectorTracker:
             if not 0.35 <= aspect <= 2.8:
                 continue
             perimeter = float(cv2.arcLength(contour, True))
-            circularity = 0.0 if perimeter <= 0 else 4.0 * math.pi * area / (perimeter * perimeter)
+            circularity = (
+                0.0
+                if perimeter <= 0
+                else 4.0 * math.pi * area / (perimeter * perimeter)
+            )
             moments = cv2.moments(contour)
             if not moments["m00"]:
                 continue
             cx = moments["m10"] / moments["m00"]
             cy = moments["m01"] / moments["m00"]
-            observed_radius = 0.25 * (w + h)
-            points = contour.reshape(-1, 2).astype(np.float64)
-            relative = points - np.array([cx, cy], dtype=np.float64)
-            point_radii = np.linalg.norm(relative, axis=1)
-            angles = np.arctan2(relative[:, 1], relative[:, 0])
-            weights = np.maximum(point_radii, 1.0) ** 2
-            fifth_moment = np.sum(weights * np.exp(5j * angles))
-            orientation = (
-                None
-                if abs(fifth_moment) <= 1e-6
-                else float(np.angle(fifth_moment) / 5.0)
-            )
-            shape_distance = (
-                0.0
-                if reference_contour is None
-                else float(
+            shape_distance = 0.0
+            if reference_contour is not None:
+                shape_distance = float(
                     cv2.matchShapes(
-                        reference_contour,
-                        contour,
-                        cv2.CONTOURS_MATCH_I1,
-                        0.0,
+                        reference_contour, contour, cv2.CONTOURS_MATCH_I1, 0.0
                     )
                 )
-            )
-            if reference_contour is not None and shape_distance > 1.35:
-                continue
+                if shape_distance > 1.35:
+                    continue
             detections.append(
                 ShapeDetection(
                     center=(float(cx), float(cy)),
-                    radius=float(observed_radius),
+                    radius=float(0.25 * (w + h)),
                     bbox=(x, y, w, h),
                     circularity=float(circularity),
                     source="contour",
                     shape_distance=shape_distance,
-                    observed_radius=float(observed_radius),
-                    orientation=orientation,
+                    observed_radius=float(0.25 * (w + h)),
                     contour=contour.copy(),
                 )
             )
-        detections = self._deduplicate(detections, self.target_radius)
-        if self.target_radius is not None:
-            fixed_radius = float(self.target_radius)
-            fixed_size = max(2, int(round(2.0 * fixed_radius)))
-            for detection in detections:
-                cx, cy = detection.center
-                detection.radius = fixed_radius
-                detection.bbox = (
-                    int(round(cx - fixed_radius)),
-                    int(round(cy - fixed_radius)),
-                    fixed_size,
-                    fixed_size,
-                )
-        return detections
+        return self._deduplicate(detections, self.target_radius)
 
     @staticmethod
     def _deduplicate(
@@ -431,7 +898,10 @@ class LieDetectorTracker:
         kept: list[ShapeDetection] = []
         for det in sorted(
             detections,
-            key=lambda item: item.observed_radius or item.radius,
+            key=lambda item: (
+                float(item.yolo_confidence),
+                item.observed_radius or item.radius,
+            ),
             reverse=True,
         ):
             if any(
@@ -456,163 +926,100 @@ class LieDetectorTracker:
         classical: list[ShapeDetection],
         learned: list[ShapeDetection],
     ) -> list[ShapeDetection]:
-        """Fuse YOLO boxes as evidence without losing classical recall.
-
-        The synthetic-only model currently misses some real shapes, so it must
-        not be used as a hard gate.  A nearby YOLO box annotates a classical
-        candidate; only strong unmatched boxes are allowed to create a new
-        candidate.
-        """
-
         if not learned:
             return classical
-        fused = list(classical)
-        matched_classical: set[int] = set()
-        for learned_detection in sorted(
-            learned, key=lambda item: item.yolo_confidence, reverse=True
-        ):
-            if classical:
-                distances = np.asarray(
-                    [
-                        np.linalg.norm(
-                            np.subtract(item.center, learned_detection.center)
-                        )
-                        for item in classical
-                    ]
+        # YOLO boxes keep their native size; classical only annotates / gap-fills.
+        fused = list(learned)
+        if len(fused) >= 8:
+            return self._deduplicate(fused, self.target_radius)
+        for classical_det in classical:
+            distances = [
+                float(np.linalg.norm(np.subtract(item.center, classical_det.center)))
+                for item in fused
+            ]
+            index = int(np.argmin(distances))
+            gate = max(18.0, 0.70 * float(self.target_radius or fused[index].radius))
+            if distances[index] <= gate:
+                if classical_det.contour is not None:
+                    fused[index].contour = classical_det.contour.copy()
+                if classical_det.orientation is not None and fused[index].orientation is None:
+                    fused[index].orientation = classical_det.orientation
+                fused[index].shape_distance = min(
+                    fused[index].shape_distance or 99.0,
+                    classical_det.shape_distance,
                 )
-                index = int(np.argmin(distances))
-                gate = max(
-                    18.0,
-                    0.70
-                    * float(
-                        self.target_radius
-                        or classical[index].observed_radius
-                        or classical[index].radius
-                    ),
-                )
-                if distances[index] <= gate and index not in matched_classical:
-                    classical[index].yolo_confidence = max(
-                        classical[index].yolo_confidence,
-                        learned_detection.yolo_confidence,
-                    )
-                    matched_classical.add(index)
-                    continue
-            if learned_detection.yolo_confidence >= 0.10:
-                fused.append(learned_detection)
+                continue
+            if len(fused) < 8:
+                fused.append(classical_det)
         return self._deduplicate(fused, self.target_radius)
 
-    def _annotate_collective_motion(
-        self,
+    @staticmethod
+    def _limit_patterns(
         detections: list[ShapeDetection],
-    ) -> None:
-        """Estimate the displacement shared by the decoy constellation.
+        *,
+        max_count: int = MAX_PATTERN_COUNT,
+    ) -> list[ShapeDetection]:
+        if len(detections) <= max_count:
+            return detections
+        ranked = sorted(
+            detections,
+            key=lambda item: (
+                0 if item.source == "bright" else 1,
+                0 if item.source == "yolo" or item.yolo_confidence > 0 else 1,
+                -float(item.yolo_confidence),
+                float(item.shape_distance),
+                -float(item.score),
+            ),
+        )
+        return ranked[:max_count]
 
-        The recording's decoys use the same per-frame trajectory. The mode of
-        all short point-set displacements therefore estimates that motion even
-        without knowing individual decoy IDs. A target candidate is unusual
-        when no previous contour, shifted by that group motion, explains it.
-        """
-
-        contour_detections = [
-            detection
-            for detection in detections
-            if detection.source in ("contour", "yolo")
-            and detection.shape_distance <= 1.35
-        ]
-        current = np.asarray(
-            [detection.center for detection in contour_detections],
+    def _annotate_collective_motion(self, detections: list[ShapeDetection]) -> None:
+        if not detections:
+            return
+        current = np.asarray([d.center for d in detections], dtype=np.float64)
+        current_orient = np.asarray(
+            [np.nan if d.orientation is None else float(d.orientation) for d in detections],
             dtype=np.float64,
         )
-        current_orientations = np.asarray(
-            [
-                np.nan if detection.orientation is None else detection.orientation
-                for detection in contour_detections
-            ],
-            dtype=np.float64,
-        )
-        if (
-            self.previous_contour_centers is None
-            or not len(self.previous_contour_centers)
-            or not len(current)
-        ):
-            self.previous_contour_centers = current
-            self.previous_contour_orientations = current_orientations
+        if self.previous_centers is None or len(self.previous_centers) == 0:
+            self.previous_centers = current
+            self.previous_orientations = current_orient
+            for detection in detections:
+                detection.collective_residual = 0.0
+                detection.collective_rotation_residual = 0.0
             return
 
-        differences = (
-            current[:, None, :] - self.previous_contour_centers[None, :, :]
-        ).reshape(-1, 2)
-        differences = differences[np.linalg.norm(differences, axis=1) <= 18.0]
-        if len(differences):
+        diffs = (current[:, None, :] - self.previous_centers[None, :, :]).reshape(-1, 2)
+        diffs = diffs[np.linalg.norm(diffs, axis=1) <= 40.0]
+        if len(diffs):
             bin_size = 2.0
-            bins = np.rint(differences / bin_size).astype(np.int32)
+            bins = np.rint(diffs / bin_size).astype(np.int32)
             keys, counts = np.unique(bins, axis=0, return_counts=True)
-            # Prefer a well-supported displacement close to the previous
-            # group motion; this suppresses stationary background contours.
             support = counts.astype(np.float64) - 0.12 * np.linalg.norm(
-                keys * bin_size - self.collective_delta,
-                axis=1,
+                keys * bin_size - self.collective_delta, axis=1
             )
             best = int(np.argmax(support))
             seed = keys[best].astype(np.float64) * bin_size
-            nearby = differences[np.linalg.norm(differences - seed, axis=1) <= 2.5]
+            nearby = diffs[np.linalg.norm(diffs - seed, axis=1) <= 3.0]
             measured = np.median(nearby, axis=0)
-            self.collective_delta = 0.35 * self.collective_delta + 0.65 * measured
-            self.collective_motion_votes = int(counts[best])
+            self.collective_delta = 0.30 * self.collective_delta + 0.70 * measured
 
-        expected = self.previous_contour_centers + self.collective_delta
+        expected = self.previous_centers + self.collective_delta
         distances = np.linalg.norm(current[:, None, :] - expected[None, :, :], axis=2)
-        nearest_previous = np.argmin(distances, axis=1)
-        position_residuals = distances[np.arange(len(current)), nearest_previous]
-
-        period = 2.0 * math.pi / 5.0
-        rotation_differences: list[float] = []
-        if self.previous_contour_orientations is not None:
-            for index, previous_index in enumerate(nearest_previous):
-                current_angle = current_orientations[index]
-                previous_angle = self.previous_contour_orientations[previous_index]
-                if (
-                    position_residuals[index] <= 8.0
-                    and np.isfinite(current_angle)
-                    and np.isfinite(previous_angle)
-                ):
-                    difference = (current_angle - previous_angle + period / 2.0) % period
-                    rotation_differences.append(float(difference - period / 2.0))
-        if rotation_differences:
-            rotation_array = np.asarray(rotation_differences)
-            bins = np.rint(np.degrees(rotation_array) / 2.0).astype(np.int32)
-            keys, counts = np.unique(bins, return_counts=True)
-            seed = math.radians(float(keys[int(np.argmax(counts))]) * 2.0)
-            nearby = rotation_array[
-                np.abs(
-                    (rotation_array - seed + period / 2.0) % period - period / 2.0
-                )
-                <= math.radians(3.0)
-            ]
-            measured_rotation = float(np.median(nearby))
-            self.collective_rotation_delta = (
-                0.35 * self.collective_rotation_delta + 0.65 * measured_rotation
-            )
-
-        for index, detection in enumerate(contour_detections):
-            rotation_residual_degrees = 0.0
-            if self.previous_contour_orientations is not None:
-                previous_angle = self.previous_contour_orientations[nearest_previous[index]]
-                current_angle = current_orientations[index]
-                if np.isfinite(previous_angle) and np.isfinite(current_angle):
-                    residual = (
-                        current_angle
-                        - previous_angle
-                        - self.collective_rotation_delta
-                        + period / 2.0
-                    ) % period - period / 2.0
-                    rotation_residual_degrees = abs(math.degrees(float(residual)))
-            detection.collective_rotation_residual = rotation_residual_degrees
-            detection.collective_residual = float(
-                position_residuals[index] + 0.55 * rotation_residual_degrees
-            )
-        self.previous_contour_centers = current
-        self.previous_contour_orientations = current_orientations
+        nearest = np.argmin(distances, axis=1)
+        position_residuals = distances[np.arange(len(current)), nearest]
+        for index, detection in enumerate(detections):
+            rotation_deg = 0.0
+            if self.previous_orientations is not None:
+                prev = self.previous_orientations[nearest[index]]
+                cur = current_orient[index]
+                if np.isfinite(prev) and np.isfinite(cur):
+                    rotation_deg = self._angle_delta_degrees(float(cur), float(prev))
+            detection.collective_rotation_residual = rotation_deg
+            # Keep translation residual pure; rotation is scored separately.
+            detection.collective_residual = float(position_residuals[index])
+        self.previous_centers = current
+        self.previous_orientations = current_orient
 
     @staticmethod
     def _hungarian(cost: np.ndarray) -> list[tuple[int, int]]:
@@ -621,8 +1028,6 @@ class LieDetectorTracker:
         if linear_sum_assignment is not None:
             rows, cols = linear_sum_assignment(cost)
             return list(zip(rows.tolist(), cols.tolist()))
-        # Deterministic greedy fallback.  The regular project environment uses
-        # SciPy; this keeps the module importable in reduced deployments.
         pairs: list[tuple[int, int]] = []
         available_rows = set(range(cost.shape[0]))
         available_cols = set(range(cost.shape[1]))
@@ -636,293 +1041,1148 @@ class LieDetectorTracker:
             available_cols.remove(col)
         return pairs
 
+    @staticmethod
+    def _appearance_distance(
+        left: Optional[np.ndarray],
+        right: Optional[np.ndarray],
+    ) -> float:
+        if left is None or right is None or left.shape != right.shape:
+            return float("inf")
+        return float(np.clip(1.0 - np.dot(left, right), 0.0, 2.0))
+
+    @staticmethod
+    def _local_signature(
+        center: tuple[float, float],
+        radius: float,
+        other_centers: Iterable[tuple[float, float]],
+    ) -> Optional[np.ndarray]:
+        distances = sorted(
+            math.hypot(center[0] - other[0], center[1] - other[1])
+            / max(float(radius), 1.0)
+            for other in other_centers
+            if math.hypot(center[0] - other[0], center[1] - other[1]) > 1e-3
+        )
+        if len(distances) < 3:
+            return None
+        return np.asarray(distances[:5], dtype=np.float32)
+
+    @staticmethod
+    def _signature_error(
+        left: Optional[np.ndarray],
+        right: Optional[np.ndarray],
+    ) -> float:
+        if left is None or right is None:
+            return float("inf")
+        count = min(len(left), len(right))
+        if count < 3:
+            return float("inf")
+        return float(np.median(np.abs(left[:count] - right[:count])))
+
+    def _advance_pending_reassociation(self) -> bool:
+        pending = self.pending_reassociation
+        if pending is None:
+            return False
+        old = self.tracks.get(pending.old_track_id)
+        child = self.tracks.get(pending.child_track_id)
+        if old is None or child is None:
+            self.pending_reassociation = None
+            return False
+        if child.lost_frames > 1:
+            self.pending_reassociation = None
+            self.reassociation_cooldown = 3
+            return False
+        if child.predicted_only or child.visible_streak < _PROVISIONAL_OBSERVATIONS:
+            return False
+
+        current_signature = self._local_signature(
+            child.state[:2],
+            child.state[2],
+            (
+                track.state[:2]
+                for track in self.tracks.values()
+                if track.id not in (old.id, child.id)
+                and track.lost_frames == 0
+                and not track.predicted_only
+            ),
+        )
+        appearance = self._appearance_distance(
+            (
+                self.target_appearance_anchor
+                if self.target_appearance_anchor is not None
+                else old.appearance
+            ),
+            child.appearance,
+        )
+        topology = self._signature_error(
+            pending.initial_signature,
+            current_signature,
+        )
+        association = float(
+            np.median(np.asarray(child.association_quality_history[-3:]))
+        )
+        accepted = (
+            pending.initial_position_error <= max(45.0, old.state[2] * 1.5)
+            and appearance <= 0.18
+            and topology <= 0.55
+            and association >= 0.20
+        )
+        self.pending_reassociation = None
+        if not accepted:
+            self.reassociation_cooldown = 3
+            return False
+
+        self.target_id = child.id
+        child.role = "real"
+        self.last_outlier_real_xy = child.state[:2]
+        del self.tracks[old.id]
+        return True
+
     def _spawn(self, detection: ShapeDetection, timestamp: float) -> _ShapeTrack:
         track = _ShapeTrack(self.next_track_id, detection, timestamp)
         self.tracks[track.id] = track
         self.next_track_id += 1
         return track
 
-    def _associate(self, detections: list[ShapeDetection], timestamp: float) -> None:
+    def _associate(self, detections: list[ShapeDetection], timestamp: float) -> bool:
         track_list = list(self.tracks.values())
         predictions = [track.predict(timestamp) for track in track_list]
         if not track_list:
             for detection in detections:
                 self._spawn(detection, timestamp)
-            return
+            return False
         if not detections:
             for track in track_list:
                 track.mark_missed()
-            self._drop_stale_tracks()
-            return
+            committed = self._advance_pending_reassociation()
+            self._drop_stale()
+            return committed
 
         large = 1e6
         cost = np.full((len(track_list), len(detections)), large, dtype=np.float32)
+        match_quality = np.zeros_like(cost)
+        reserved_col: Optional[int] = None
+        reserved_position_error = float("inf")
+        provisional_old: Optional[_ShapeTrack] = None
+        if self.reassociation_cooldown > 0:
+            self.reassociation_cooldown -= 1
+        if self.provisional_reassociation_enabled and self.target_id is not None:
+            provisional_old = self.tracks.get(self.target_id)
+            if (
+                provisional_old is not None
+                and provisional_old.lost_frames >= _PROVISIONAL_GAP_FRAMES
+                and self.pending_reassociation is None
+                and self.reassociation_cooldown == 0
+            ):
+                old_prediction = predictions[track_list.index(provisional_old)]
+                anchor = (
+                    self.target_appearance_anchor
+                    if self.target_appearance_anchor is not None
+                    else provisional_old.appearance
+                )
+                candidates: list[tuple[float, int, float]] = []
+                for col, detection in enumerate(detections):
+                    position_error = math.hypot(
+                        detection.center[0] - old_prediction[0],
+                        detection.center[1] - old_prediction[1],
+                    )
+                    appearance_error = self._appearance_distance(
+                        anchor, detection.appearance
+                    )
+                    if (
+                        position_error
+                        <= self.max_match_distance + 75.0
+                        and appearance_error <= 0.30
+                    ):
+                        candidates.append(
+                            (
+                                position_error + 80.0 * appearance_error,
+                                col,
+                                position_error,
+                            )
+                        )
+                if candidates:
+                    candidates.sort()
+                    best = candidates[0]
+                    # Repeated star textures frequently produce several nearly
+                    # equivalent matches. In that case keep coasting the old
+                    # REAL instead of inventing certainty and committing a child.
+                    unambiguous = (
+                        len(candidates) == 1
+                        or candidates[1][0] - best[0] >= 20.0
+                    )
+                    if unambiguous:
+                        _, reserved_col, reserved_position_error = best
+
         for row, (track, prediction) in enumerate(zip(track_list, predictions)):
+            if (
+                self.provisional_reassociation_enabled
+                and track.id == self.target_id
+                and track.lost_frames >= _PROVISIONAL_GAP_FRAMES
+                and (
+                    reserved_col is not None
+                    or (
+                        self.pending_reassociation is not None
+                        and self.pending_reassociation.old_track_id == track.id
+                    )
+                )
+            ):
+                continue
             px, py, pr = prediction
-            gate = self.max_match_distance + min(track.lost_frames, 5) * 8.0
-            if track.id == self.target_id and self.target_kind == "contour":
-                # A wide reacquisition gate eagerly jumps to one of the many
-                # identical stars. The hypothesis beam handles recovery while
-                # this conservative primary association protects identity.
-                gate = 35.0
+            gate = self.max_match_distance + min(track.lost_frames, 6) * 10.0
+            if track.id == self.target_id:
+                gate += 15.0
             for col, detection in enumerate(detections):
                 distance = math.hypot(
-                    detection.center[0] - px,
-                    detection.center[1] - py,
+                    detection.center[0] - px, detection.center[1] - py
                 )
                 radius_delta = abs(detection.radius - pr)
-                if distance <= gate and radius_delta <= max(30.0, pr * 0.75):
-                    if track.id == self.target_id and self.target_kind == "contour":
-                        if (
-                            detection.source in ("contour", "yolo")
-                            and detection.shape_distance > 1.0
-                        ):
-                            continue
-                    shape_cost = (
-                        80.0 * detection.shape_distance
-                        if track.id == self.target_id
-                        and self.target_kind == "contour"
-                        and detection.source in ("contour", "yolo")
-                        else 0.0
+                if distance <= gate and radius_delta <= max(30.0, pr * 0.85):
+                    frame_gap = max(1, track.lost_frames + 1)
+                    measured_velocity = (
+                        (
+                            detection.center[0] - track.last_detection.center[0]
+                        ) / frame_gap,
+                        (
+                            detection.center[1] - track.last_detection.center[1]
+                        ) / frame_gap,
                     )
-                    learned_bonus = 10.0 * detection.yolo_confidence
+                    expected_velocity = track.robust_velocity
+                    acceleration_error = math.hypot(
+                        measured_velocity[0] - expected_velocity[0],
+                        measured_velocity[1] - expected_velocity[1],
+                    )
                     cost[row, col] = (
-                        distance + 0.25 * radius_delta + shape_cost - learned_bonus
+                        distance
+                        + 0.20 * radius_delta
+                        - 10.0 * detection.yolo_confidence
                     )
+                    innovation_quality = math.exp(
+                        -0.5 * (distance / 30.0) ** 2
+                    )
+                    continuity_quality = (
+                        math.exp(-max(0.0, acceleration_error - 4.0) / 10.0)
+                        if track.motion_history
+                        else 1.0
+                    )
+                    match_quality[row, col] = float(
+                        innovation_quality * continuity_quality
+                    )
+        if reserved_col is not None:
+            cost[:, reserved_col] = large
 
         matched_tracks: set[int] = set()
         matched_detections: set[int] = set()
-
-        # Protect the identity selected during the opaque acquisition phase.
-        # A single global Hungarian solve is allowed to sacrifice that track
-        # when doing so lowers the sum for dozens of visually identical
-        # decoys.  For the mini-game the selected identity is semantically
-        # special, so match it first and run Hungarian on everything left.
-        target_row = next(
-            (row for row, track in enumerate(track_list) if track.id == self.target_id),
-            None,
-        )
-        if target_row is not None:
-            bright_cols = [
-                col
-                for col, detection in enumerate(detections)
-                if detection.source == "bright" and cost[target_row, col] < large
-            ]
-            target_col = (
-                min(bright_cols, key=lambda col: cost[target_row, col])
-                if bright_cols
-                else int(np.argmin(cost[target_row]))
-            )
-            if cost[target_row, target_col] < large:
-                track_list[target_row].update(
-                    detections[target_col],
-                    timestamp,
-                )
-                matched_tracks.add(target_row)
-                matched_detections.add(target_col)
-
-        remaining_rows = [row for row in range(len(track_list)) if row not in matched_tracks]
-        remaining_cols = [col for col in range(len(detections)) if col not in matched_detections]
-        reduced_cost = cost[np.ix_(remaining_rows, remaining_cols)]
-        for reduced_row, reduced_col in self._hungarian(reduced_cost):
-            row = remaining_rows[reduced_row]
-            col = remaining_cols[reduced_col]
+        for row, col in self._hungarian(cost):
             if cost[row, col] >= large:
                 continue
-            track_list[row].update(detections[col], timestamp)
+            track_list[row].update(
+                detections[col],
+                timestamp,
+                association_quality=float(match_quality[row, col]),
+            )
             matched_tracks.add(row)
             matched_detections.add(col)
-
         for row, track in enumerate(track_list):
             if row not in matched_tracks:
                 track.mark_missed()
+        if reserved_col is not None and provisional_old is not None:
+            detection = detections[reserved_col]
+            child = self._spawn(detection, timestamp)
+            signature = self._local_signature(
+                detection.center,
+                detection.radius,
+                (
+                    other.center
+                    for col, other in enumerate(detections)
+                    if col != reserved_col
+                ),
+            )
+            self.pending_reassociation = _PendingReassociation(
+                old_track_id=provisional_old.id,
+                child_track_id=child.id,
+                initial_signature=signature,
+                initial_position_error=reserved_position_error,
+            )
+            matched_detections.add(reserved_col)
         for col, detection in enumerate(detections):
             if col not in matched_detections:
                 self._spawn(detection, timestamp)
-        self._drop_stale_tracks()
+        committed = self._advance_pending_reassociation()
+        self._drop_stale()
+        return committed
 
-    def _drop_stale_tracks(self) -> None:
-        stale = [
-            track_id
-            for track_id, track in self.tracks.items()
-            if track.lost_frames > self.max_lost_frames and track_id != self.target_id
-        ]
+    def _outside_frame(
+        self, center: tuple[float, float], margin: float = _FRAME_EXIT_MARGIN
+    ) -> bool:
+        if self.frame_size is None:
+            return False
+        width, height = self.frame_size
+        x, y = float(center[0]), float(center[1])
+        return x < -margin or y < -margin or x > width + margin or y > height + margin
+
+    def _leaving_frame(self, track: _ShapeTrack) -> bool:
+        """True when the track sits in the border band and drifts outward."""
+        if self.frame_size is None:
+            return False
+        width, height = self.frame_size
+        x, y, radius = track.state
+        vx, vy = track.predicted_velocity
+        margin = max(_EDGE_SWITCH_MARGIN, radius * 0.5)
+        return (
+            (x <= margin and vx < 0.0)
+            or (x >= width - margin and vx > 0.0)
+            or (y <= margin and vy < 0.0)
+            or (y >= height - margin and vy > 0.0)
+        )
+
+    def _drop_stale(self) -> None:
+        stale: list[int] = []
+        for track_id, track in self.tracks.items():
+            if track.lost_frames == 0:
+                continue
+            # A coasting track that has left the panel can never be matched
+            # again; keeping it alive only extrapolates it further off-screen.
+            if self._outside_frame(track.state[:2]):
+                stale.append(track_id)
+                continue
+            budget = (
+                _REAL_MAX_COAST
+                if track_id == self.target_id
+                else self.max_lost_frames
+            )
+            if track.lost_frames > budget:
+                stale.append(track_id)
         for track_id in stale:
             del self.tracks[track_id]
+        if self.target_id is not None and self.target_id not in self.tracks:
+            # Release the label so scoring can re-acquire a live track instead
+            # of staying pinned to a ghost forever.
+            self.target_id = None
+            self.contamination_streak = 0
+            self.contamination_candidate = None
 
     @staticmethod
-    def _clamp_velocity(velocity: np.ndarray, limit: float = 650.0) -> np.ndarray:
-        speed = float(np.linalg.norm(velocity))
-        if speed <= limit or speed <= 1e-6:
-            return velocity
-        return velocity * (limit / speed)
+    def _velocity_speed(velocity: tuple[float, float]) -> float:
+        return float(math.hypot(velocity[0], velocity[1]))
 
-    def _seed_target_hypothesis(
-        self,
-        detection: ShapeDetection,
-        timestamp: float,
-    ) -> None:
-        """Start or authoritatively correct the beam from an opaque target."""
+    @staticmethod
+    def _velocity_angle(velocity: tuple[float, float]) -> Optional[float]:
+        if abs(velocity[0]) < 1e-6 and abs(velocity[1]) < 1e-6:
+            return None
+        return float(math.atan2(velocity[1], velocity[0]))
 
-        center = np.asarray(detection.center, dtype=np.float64)
-        velocity = np.zeros(2, dtype=np.float64)
-        radius_velocity = 0.0
-        if self.target_hypotheses:
-            previous = self.target_hypotheses[0]
-            dt = float(np.clip(timestamp - previous.last_timestamp, 1.0 / 120.0, 0.25))
-            measured_velocity = (center - previous.center) / dt
-            velocity = self._clamp_velocity(
-                0.55 * previous.velocity + 0.45 * measured_velocity
+    @staticmethod
+    def _circular_mean(angles: list[float]) -> Optional[float]:
+        if not angles:
+            return None
+        sine = float(sum(math.sin(angle) for angle in angles))
+        cosine = float(sum(math.cos(angle) for angle in angles))
+        if abs(sine) < 1e-9 and abs(cosine) < 1e-9:
+            return None
+        return float(math.atan2(sine, cosine))
+
+    @staticmethod
+    def _heading_delta_degrees(a: float, b: float) -> float:
+        residual = (a - b + math.pi) % (2.0 * math.pi) - math.pi
+        return abs(math.degrees(float(residual)))
+
+    @staticmethod
+    def _pairwise_rigidity_error(
+        centers: dict[int, tuple[float, float]],
+        previous: dict[int, tuple[float, float]],
+    ) -> float:
+        ids = [track_id for track_id in centers if track_id in previous]
+        if len(ids) < 2:
+            return 0.0
+        changes: list[float] = []
+        for index, left in enumerate(ids):
+            for right in ids[index + 1 :]:
+                now = math.hypot(
+                    centers[left][0] - centers[right][0],
+                    centers[left][1] - centers[right][1],
+                )
+                then = math.hypot(
+                    previous[left][0] - previous[right][0],
+                    previous[left][1] - previous[right][1],
+                )
+                changes.append(abs(now - then))
+        return float(np.mean(np.asarray(changes, dtype=np.float64))) if changes else 0.0
+
+    def _score_real_candidates(self) -> dict[int, float]:
+        """Score each track as REAL using four leave-one-out cues.
+
+        1) self-rotation (REAL spins; BG does not)
+        2) BG layout rigidity after excluding the candidate
+        3) BG speed consistency after excluding the candidate
+        4) translation-direction disagreement vs BG consensus
+        """
+        active = [
+            track
+            for track in self.tracks.values()
+            if track.lost_frames == 0
+            and not track.predicted_only
+            and track.last_detection is not None
+            and track.prev_center is not None
+        ]
+        scores: dict[int, float] = {}
+        if len(active) < 2:
+            for track in self.tracks.values():
+                if track.lost_frames > 4 or track.last_detection is None:
+                    continue
+                detection = track.last_detection
+                track.translation_residual = float(detection.collective_residual)
+                track.rotation_residual = float(detection.collective_rotation_residual)
+                spin = 0.0
+                if len(track.rotation_delta_history) >= 2:
+                    spin = self._rotation_motion_score(
+                        track.rotation_delta_history,
+                        track.rotation_dt_history,
+                        track.orientation_quality_history[
+                            -len(track.rotation_delta_history):
+                        ],
+                    )
+                score = (
+                    _W_TRANSLATION * float(detection.collective_residual)
+                    + _W_ROTATION * spin
+                )
+                if track.id == self.target_id:
+                    score += _REAL_STICKY_BONUS
+                track.real_score = float(score)
+                track.rotation_score = spin
+                track.direction_score = 0.0
+                track.speed_score = 0.0
+                track.rigidity_score = 0.0
+                track.appearance_score = 0.0
+                scores[track.id] = score
+            return scores
+
+        centers = {
+            track.id: (
+                float(track.last_detection.center[0]),
+                float(track.last_detection.center[1]),
             )
-            radius_velocity = float(
-                np.clip(
-                    0.55 * previous.radius_velocity
-                    + 0.45 * (detection.radius - previous.radius) / dt,
-                    -250.0,
-                    250.0,
+            for track in active
+        }
+        previous = {
+            track.id: (float(track.prev_center[0]), float(track.prev_center[1]))
+            for track in active
+        }
+        velocities = {track.id: track.velocity for track in active}
+        speeds = {
+            track_id: self._velocity_speed(velocity)
+            for track_id, velocity in velocities.items()
+        }
+        headings = {
+            track_id: (
+                self._velocity_angle(velocity)
+                if speeds[track_id] >= _MIN_HEADING_SPEED
+                else None
+            )
+            for track_id, velocity in velocities.items()
+        }
+        full_rigidity = self._pairwise_rigidity_error(centers, previous)
+        appearance_distances: dict[int, float] = {}
+        if self.target_appearance_anchor is not None:
+            for track in active:
+                if track.appearance is None:
+                    continue
+                appearance_distances[track.id] = float(
+                    np.clip(
+                        1.0
+                        - np.dot(
+                            track.appearance,
+                            self.target_appearance_anchor,
+                        ),
+                        0.0,
+                        2.0,
+                    )
+                )
+        appearance_median = (
+            float(np.median(np.asarray(list(appearance_distances.values()))))
+            if len(appearance_distances) >= 4
+            else 0.0
+        )
+        appearance_mad = (
+            float(
+                np.median(
+                    np.abs(
+                        np.asarray(list(appearance_distances.values()))
+                        - appearance_median
+                    )
                 )
             )
-        self.target_hypotheses = [
-            _TargetHypothesis(
-                center=center,
-                velocity=velocity,
-                radius=float(detection.radius),
-                radius_velocity=radius_velocity,
-                cost=0.0,
-                missed=0,
-                age=1,
-                last_timestamp=timestamp,
-                predicted_only=False,
-                group_evidence=0.0,
-                last_collective_residual=0.0,
+            if len(appearance_distances) >= 4
+            else 0.0
+        )
+        current_appearance_distance = appearance_distances.get(self.target_id)
+        best_appearance_distance = (
+            min(appearance_distances.values())
+            if appearance_distances
+            else None
+        )
+        appearance_recovery_active = (
+            current_appearance_distance is not None
+            and best_appearance_distance is not None
+            and best_appearance_distance <= 0.05
+            and current_appearance_distance - best_appearance_distance >= 0.02
+        )
+
+        for track in active:
+            detection = track.last_detection
+            track.translation_residual = float(detection.collective_residual)
+            track.rotation_residual = float(detection.collective_rotation_residual)
+
+            # 1) self-rotation
+            rotation = 0.0
+            if len(track.rotation_delta_history) >= 2:
+                rotation = self._rotation_motion_score(
+                    track.rotation_delta_history,
+                    track.rotation_dt_history,
+                    track.orientation_quality_history[
+                        -len(track.rotation_delta_history):
+                    ],
+                )
+            rotation += float(detection.collective_rotation_residual)
+
+            bg_ids = [other.id for other in active if other.id != track.id]
+            bg_speeds = [speeds[track_id] for track_id in bg_ids]
+            bg_heading_items = [
+                headings[track_id]
+                for track_id in bg_ids
+                if headings[track_id] is not None
+            ]
+            bg_centers = {track_id: centers[track_id] for track_id in bg_ids}
+            bg_previous = {track_id: previous[track_id] for track_id in bg_ids}
+
+            # 2) relative-position rigidity of BG after excluding candidate
+            bg_rigidity = self._pairwise_rigidity_error(bg_centers, bg_previous)
+            rigidity = max(0.0, full_rigidity - bg_rigidity)
+
+            # 3) BG speed consistency + candidate speed disagreement
+            speed = speeds[track.id]
+            if bg_speeds:
+                bg_speed_med = float(np.median(np.asarray(bg_speeds)))
+                bg_speed_std = float(np.std(np.asarray(bg_speeds)))
+                speed_disagree = abs(speed - bg_speed_med)
+                # Prefer candidates that make the remaining BG pack tighter.
+                speed_pack = max(
+                    0.0,
+                    float(np.std(np.asarray(list(speeds.values())))) - bg_speed_std,
+                )
+            else:
+                bg_speed_med = 0.0
+                speed_disagree = speed
+                speed_pack = 0.0
+            speed_score = speed_disagree + 0.75 * speed_pack
+
+            # 4) translation direction: REAL disagrees with BG consensus
+            own_heading = headings[track.id]
+            bg_mean = self._circular_mean(bg_heading_items)
+            if (
+                own_heading is None
+                or bg_mean is None
+                or len(bg_heading_items) < 3
+            ):
+                direction = 0.0
+            else:
+                direction = self._heading_delta_degrees(own_heading, bg_mean)
+
+            appearance_score = 0.0
+            if (
+                appearance_recovery_active
+                and track.id in appearance_distances
+                and appearance_mad > 0.0
+            ):
+                appearance_score = float(
+                    np.clip(
+                        (
+                            appearance_median
+                            - appearance_distances[track.id]
+                        )
+                        / max(0.008, appearance_mad),
+                        -2.0,
+                        3.0,
+                    )
+                )
+            score = (
+                _W_ROTATION * rotation
+                + _W_DIRECTION * direction
+                + _W_SPEED * speed_score
+                + _W_RIGIDITY * rigidity
+                + _W_TRANSLATION * float(detection.collective_residual)
+                + _W_ANCHOR_APPEARANCE * appearance_score
             )
-        ]
+            if track.id == self.target_id:
+                score += _REAL_STICKY_BONUS
+            track.rotation_score = float(rotation)
+            track.direction_score = float(direction)
+            track.speed_score = float(speed_score)
+            track.rigidity_score = float(rigidity)
+            track.appearance_score = float(appearance_score)
+            track.real_score = float(score)
+            scores[track.id] = float(score)
+        return scores
 
     @staticmethod
-    def _hypothesis_is_distinct(
-        candidate: _TargetHypothesis,
-        kept: list[_TargetHypothesis],
-    ) -> bool:
-        """NMS in position/velocity space, preserving genuinely different paths."""
+    def _track_looks_like_background(track: _ShapeTrack) -> bool:
+        """Whether the current label has lost the characteristic REAL cues."""
+        return (
+            track.rotation_score < 8.0
+            and track.direction_score < 15.0
+            and track.translation_residual < 8.0
+        )
 
-        for other in kept:
-            center_distance = float(np.linalg.norm(candidate.center - other.center))
-            velocity_distance = float(np.linalg.norm(candidate.velocity - other.velocity))
-            if center_distance < 14.0 and velocity_distance < 90.0:
+    @staticmethod
+    def _identity_emissions(scores: dict[int, float]) -> dict[int, float]:
+        """Robustly normalize per-frame cue scores for path accumulation."""
+        if not scores:
+            return {}
+        values = np.asarray(list(scores.values()), dtype=np.float64)
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        scale = max(5.0, 1.4826 * mad)
+        return {
+            track_id: float(np.clip(
+                (score - median) / scale,
+                -_IDENTITY_EMISSION_CLIP,
+                _IDENTITY_EMISSION_CLIP,
+            ))
+            for track_id, score in scores.items()
+        }
+
+    def _advance_identity_hypotheses(
+        self,
+        scores: dict[int, float],
+        *,
+        commit: bool = True,
+    ) -> bool:
+        """Advance a small beam of continuous REAL identity paths.
+
+        Unlike greedy role switching, every hypothesis has to descend from the
+        white-seeded path through spatially reachable ID hand-offs. Competing
+        paths remain alive, so a brief cue spike cannot immediately teleport
+        REAL to a distant decoy.
+        """
+        path_scores = dict(scores)
+        if self.target_id is not None and self.target_id in path_scores:
+            # Greedy scoring includes a public-target sticky bonus. It is
+            # useful for the baseline decision but would make an independent
+            # path validator circular, so remove it from beam emissions.
+            path_scores[self.target_id] -= _REAL_STICKY_BONUS
+        emissions = self._identity_emissions(path_scores)
+        self.identity_path_recommended_id = None
+        previous = self.target_hypotheses
+        if not previous:
+            seed_id = (
+                self.target_id
+                if self.target_id is not None and self.target_id in self.tracks
+                else (max(scores, key=scores.get) if scores else None)
+            )
+            if seed_id is not None:
+                track = self.tracks[seed_id]
+                previous = {
+                    seed_id: _IdentityHypothesis(
+                        track_id=seed_id,
+                        score=emissions.get(seed_id, 0.0),
+                        center=track.state[:2],
+                        radius=track.state[2],
+                    )
+                }
+
+        advanced: dict[int, _IdentityHypothesis] = {}
+        for track_id, emission in emissions.items():
+            track = self.tracks.get(track_id)
+            if track is None or track.lost_frames > 4:
+                continue
+            center = track.state[:2]
+            radius = track.state[2]
+            best: Optional[_IdentityHypothesis] = None
+            best_score = -float("inf")
+            for hypothesis in previous.values():
+                distance = math.hypot(
+                    center[0] - hypothesis.center[0],
+                    center[1] - hypothesis.center[1],
+                )
+                if hypothesis.track_id == track_id:
+                    transition_penalty = min(
+                        1.5, 0.15 * distance / max(radius, 1.0)
+                    )
+                    handoffs = hypothesis.handoffs
+                else:
+                    gate = min(
+                        160.0,
+                        max(
+                            _IDENTITY_HANDOFF_GATE,
+                            1.25 * max(radius, hypothesis.radius),
+                        )
+                        + 12.0 * hypothesis.missing,
+                    )
+                    if distance > gate:
+                        continue
+                    transition_penalty = (
+                        _IDENTITY_HANDOFF_PENALTY
+                        + _IDENTITY_HANDOFF_DISTANCE_WEIGHT
+                        * distance / max(gate, 1.0)
+                    )
+                    handoffs = hypothesis.handoffs + 1
+                candidate_score = (
+                    _IDENTITY_PATH_DECAY * hypothesis.score
+                    + emission
+                    - transition_penalty
+                )
+                if candidate_score > best_score:
+                    best_score = candidate_score
+                    best = _IdentityHypothesis(
+                        track_id=track_id,
+                        score=float(candidate_score),
+                        center=(float(center[0]), float(center[1])),
+                        radius=float(radius),
+                        age=hypothesis.age + 1,
+                        missing=0,
+                        handoffs=handoffs,
+                    )
+            if best is not None:
+                advanced[track_id] = best
+
+        # Keep coasting paths alive through short detector gaps. They may hand
+        # off to a newly spawned nearby ID on a later frame.
+        for track_id, hypothesis in previous.items():
+            if track_id in advanced or hypothesis.missing >= _IDENTITY_MAX_MISSING:
+                continue
+            track = self.tracks.get(track_id)
+            center = hypothesis.center if track is None else track.state[:2]
+            radius = hypothesis.radius if track is None else track.state[2]
+            advanced[track_id] = _IdentityHypothesis(
+                track_id=track_id,
+                score=(
+                    _IDENTITY_PATH_DECAY * hypothesis.score
+                    - _IDENTITY_MISSING_PENALTY
+                ),
+                center=(float(center[0]), float(center[1])),
+                radius=float(radius),
+                age=hypothesis.age + 1,
+                missing=hypothesis.missing + 1,
+                handoffs=hypothesis.handoffs,
+            )
+
+        if not advanced and scores:
+            # The complete beam can disappear after a long occlusion. Re-seed
+            # only then; normal frames never create a disconnected path.
+            seed_id = max(scores, key=scores.get)
+            track = self.tracks[seed_id]
+            advanced[seed_id] = _IdentityHypothesis(
+                track_id=seed_id,
+                score=emissions.get(seed_id, 0.0),
+                center=track.state[:2],
+                radius=track.state[2],
+            )
+
+        ordered = sorted(
+            advanced.values(), key=lambda hypothesis: hypothesis.score, reverse=True
+        )[: self.hypothesis_count]
+        # Beam pruning must never silently discard the currently published
+        # path; doing so would force an immediate, potentially distant switch.
+        current_before_prune = advanced.get(self.target_id)
+        if (
+            current_before_prune is not None
+            and all(
+                item.track_id != current_before_prune.track_id
+                for item in ordered
+            )
+        ):
+            if len(ordered) >= self.hypothesis_count:
+                ordered[-1] = current_before_prune
+            else:
+                ordered.append(current_before_prune)
+        self.target_hypotheses = {
+            hypothesis.track_id: hypothesis for hypothesis in ordered
+        }
+        if not ordered:
+            return False
+
+        best = ordered[0]
+        current = self.target_hypotheses.get(self.target_id)
+        if self.target_id is None or current is None:
+            self.identity_path_recommended_id = best.track_id
+            if not commit:
                 return False
+            old_id = self.target_id
+            self.target_id = best.track_id
+            self.identity_path_candidate_id = None
+            self.identity_path_candidate_streak = 0
+            return old_id != self.target_id
+        if best.track_id == self.target_id:
+            self.identity_path_candidate_id = None
+            self.identity_path_candidate_streak = 0
+            if self.identity_switch_cooldown > 0:
+                self.identity_switch_cooldown -= 1
+            return False
+
+        distance = math.hypot(
+            best.center[0] - current.center[0],
+            best.center[1] - current.center[1],
+        )
+        if self.identity_switch_cooldown > 0:
+            self.identity_switch_cooldown -= 1
+            self.identity_path_candidate_id = None
+            self.identity_path_candidate_streak = 0
+            return False
+        required_margin = _IDENTITY_SWITCH_MARGIN + min(3.0, distance / 100.0)
+        if best.score - current.score < required_margin:
+            self.identity_path_candidate_id = None
+            self.identity_path_candidate_streak = 0
+            return False
+        if self.identity_path_candidate_id == best.track_id:
+            self.identity_path_candidate_streak += 1
+        else:
+            self.identity_path_candidate_id = best.track_id
+            self.identity_path_candidate_streak = 1
+        votes_needed = _IDENTITY_SWITCH_VOTES + (
+            _IDENTITY_FAR_SWITCH_EXTRA_VOTES
+            if distance > _IDENTITY_FAR_SWITCH_DISTANCE
+            else 0
+        )
+        if self.identity_path_candidate_streak < votes_needed:
+            return False
+
+        self.identity_path_recommended_id = best.track_id
+        if not commit:
+            return False
+        self.target_id = best.track_id
+        self.identity_switch_cooldown = _IDENTITY_SWITCH_COOLDOWN
+        self.identity_path_candidate_id = None
+        self.identity_path_candidate_streak = 0
+        self.challenger_evidence.clear()
+        self.contamination_streak = 0
+        self.contamination_candidate = None
+        self.last_outlier_real_xy = best.center
         return True
 
-    def _update_target_hypotheses(
+    def _assign_roles_multi_hypothesis(
         self,
-        detections: list[ShapeDetection],
-        timestamp: float,
-        bright: Optional[ShapeDetection],
-    ) -> Optional[_TargetHypothesis]:
-        """Advance a bounded Top-K beam for an initially highlighted contour.
+        scores: dict[int, float],
+    ) -> bool:
+        switched = self._advance_identity_hypotheses(scores)
+        for track in self.tracks.values():
+            if track.id == self.target_id:
+                track.role = "real"
+            elif track.lost_frames <= 4:
+                track.role = "bg"
+            else:
+                track.role = "unknown"
+        return switched
 
-        Each prior branch emits a coast branch and zero or more detection
-        branches.  Keeping both is important: near a crossing, the locally
-        cheapest star is often the wrong star, while the coast branch retains
-        enough history to recover after the shapes separate again.
-        """
+    def _identity_paths_allow_switch(
+        self,
+        current: _ShapeTrack,
+        challenger: _ShapeTrack,
+    ) -> bool:
+        distance = math.hypot(
+            challenger.state[0] - current.state[0],
+            challenger.state[1] - current.state[1],
+        )
+        if distance <= _IDENTITY_FAR_SWITCH_DISTANCE:
+            self.identity_unvalidated_candidate_id = None
+            self.identity_unvalidated_candidate_streak = 0
+            self.identity_unvalidated_center = None
+            return True
+        if self.identity_path_recommended_id == challenger.id:
+            self.identity_unvalidated_candidate_id = None
+            self.identity_unvalidated_candidate_streak = 0
+            self.identity_unvalidated_center = None
+            return True
+        center = challenger.state[:2]
+        self.identity_unvalidated_candidate_streak += 1
+        self.identity_unvalidated_candidate_id = challenger.id
+        self.identity_unvalidated_center = (
+            float(center[0]),
+            float(center[1]),
+        )
+        votes_needed = (
+            _IDENTITY_EXTREME_RECOVERY_VOTES
+            if distance >= _IDENTITY_EXTREME_RECOVERY_DISTANCE
+            else _IDENTITY_UNVALIDATED_RECOVERY_VOTES
+        )
+        return self.identity_unvalidated_candidate_streak >= votes_needed
 
-        if bright is not None:
-            self._seed_target_hypothesis(bright, timestamp)
-            return self.target_hypotheses[0]
-        if not self.target_hypotheses:
-            return None
+    def _assign_roles(self) -> bool:
+        """Label REAL from four-cue scores after white fade."""
+        scores = self._score_real_candidates()
+        if self.multi_hypothesis_identity_enabled:
+            self._advance_identity_hypotheses(scores, commit=False)
+        switched = False
+        current_track = (
+            self.tracks.get(self.target_id) if self.target_id is not None else None
+        )
 
-        contour_detections = [
-            detection
-            for detection in detections
-            if detection.source in ("contour", "yolo")
-            and detection.shape_distance <= 1.35
-        ]
-        branches: list[_TargetHypothesis] = []
-        for hypothesis in self.target_hypotheses:
-            predicted_center, predicted_radius, dt = hypothesis.predict(timestamp)
+        def _apply_roles() -> None:
+            for track in self.tracks.values():
+                if track.id == self.target_id:
+                    track.role = "real"
+                elif track.lost_frames <= 4:
+                    track.role = "bg"
+                else:
+                    track.role = "unknown"
 
-            # Never discard the motion-only explanation just because a nearby
-            # decoy exists. Its penalty grows so a later consistent contour
-            # sequence can overtake it.
-            branches.append(
-                _TargetHypothesis(
-                    center=predicted_center,
-                    velocity=hypothesis.velocity * 0.985,
-                    radius=predicted_radius,
-                    radius_velocity=hypothesis.radius_velocity * 0.95,
-                    cost=0.965 * hypothesis.cost + 1.35 + 0.22 * hypothesis.missed,
-                    missed=hypothesis.missed + 1,
-                    age=hypothesis.age + 1,
-                    last_timestamp=timestamp,
-                    predicted_only=True,
-                    group_evidence=0.96 * hypothesis.group_evidence,
-                    last_collective_residual=0.0,
+        if not scores:
+            self.contamination_streak = 0
+            self.contamination_candidate = None
+            self.challenger_evidence.clear()
+            self.shadow_candidate_id = None
+            self.shadow_candidate_votes.clear()
+            self.identity_unvalidated_candidate_id = None
+            self.identity_unvalidated_candidate_streak = 0
+            self.identity_unvalidated_center = None
+            _apply_roles()
+            return False
+
+        viable = {
+            track_id: score
+            for track_id, score in scores.items()
+            if track_id in self.tracks and not self._leaving_frame(self.tracks[track_id])
+        }
+        ranking = viable or scores
+        best_id = max(ranking, key=ranking.get)
+        if best_id == self.target_id:
+            self.identity_unvalidated_candidate_id = None
+            self.identity_unvalidated_candidate_streak = 0
+            self.identity_unvalidated_center = None
+        if self.target_id is None:
+            self.target_id = best_id
+            switched = True
+            self.contamination_streak = 0
+            self.contamination_candidate = None
+            self.challenger_evidence.clear()
+            self.shadow_candidate_id = None
+            self.shadow_candidate_votes.clear()
+            _apply_roles()
+            return switched
+
+        healthy = (
+            current_track is not None
+            and current_track.lost_frames <= _REAL_COAST_GRACE
+            and self.target_id in scores
+        )
+        if not healthy:
+            # Coast on the same id; only adopt best when the old track is gone.
+            if current_track is None and best_id != self.target_id:
+                self.target_id = best_id
+                switched = True
+            self.contamination_streak = 0
+            self.contamination_candidate = None
+            self.challenger_evidence.clear()
+            self.shadow_candidate_id = None
+            self.shadow_candidate_votes.clear()
+            _apply_roles()
+            return switched
+
+        shadow_margin = scores.get(best_id, -1e9) - scores.get(
+            self.target_id, -1e9
+        )
+        if (
+            self.shadow_switch_enabled
+            and best_id != self.target_id
+            and shadow_margin < 45.0
+            and self.tracks.get(best_id) is not None
+            and self.tracks[best_id].visible_streak >= 30
+        ):
+            challenger = self.tracks.get(best_id)
+            margin = shadow_margin
+            identity_continuity_support = (
+                challenger is not None
+                and challenger.visible_streak >= 3
+                and challenger.motion_reliability >= 0.05
+                and challenger.appearance_score
+                >= current_track.appearance_score - 0.75
+            )
+            motion_layout_support = (
+                challenger is not None
+                and (
+                    challenger.rotation_score >= current_track.rotation_score + 1.5
+                    or challenger.direction_score
+                    >= current_track.direction_score + 12.0
+                    or challenger.speed_score
+                    >= current_track.speed_score + 1.5
+                    or challenger.rigidity_score
+                    >= current_track.rigidity_score + 0.8
+                    or challenger.translation_residual
+                    >= current_track.translation_residual + 4.0
                 )
             )
-
-            gate = min(145.0, 40.0 + 9.0 * hypothesis.missed)
-            for detection in contour_detections:
-                measured_center = np.asarray(detection.center, dtype=np.float64)
-                innovation = measured_center - predicted_center
-                distance = float(np.linalg.norm(innovation))
-                radius_delta = abs(float(detection.radius) - predicted_radius)
-                if distance > gate or radius_delta > max(38.0, predicted_radius * 0.85):
-                    continue
-
-                measured_velocity = (measured_center - hypothesis.center) / dt
-                measured_velocity = self._clamp_velocity(measured_velocity)
-                new_velocity = self._clamp_velocity(
-                    0.62 * hypothesis.velocity + 0.38 * measured_velocity
-                )
-                acceleration = float(np.linalg.norm(new_velocity - hypothesis.velocity))
-                new_radius_velocity = float(
-                    np.clip(
-                        0.65 * hypothesis.radius_velocity
-                        + 0.35 * (detection.radius - hypothesis.radius) / dt,
-                        -250.0,
-                        250.0,
+            qualifies = (
+                best_id != self.target_id
+                and challenger is not None
+                and challenger.lost_frames == 0
+                and not challenger.predicted_only
+                and not self._leaving_frame(challenger)
+                and (
+                    not self.multi_hypothesis_identity_enabled
+                    or self._identity_paths_allow_switch(
+                        current_track, challenger
                     )
                 )
-                position_cost = 0.5 * (distance / 22.0) ** 2
-                shape_cost = 1.8 * min(2.0, detection.shape_distance)
-                radius_cost = 0.15 * (radius_delta / 18.0) ** 2
-                acceleration_cost = 0.18 * (acceleration / 180.0) ** 2
-                evidence_increment = float(
-                    np.clip((detection.collective_residual - 8.0) / 10.0, -0.5, 2.5)
-                )
-                group_evidence = 0.90 * hypothesis.group_evidence + evidence_increment
-                branches.append(
-                    _TargetHypothesis(
-                        center=measured_center,
-                        velocity=new_velocity,
-                        radius=float(detection.radius),
-                        radius_velocity=new_radius_velocity,
-                        cost=(
-                            0.965 * hypothesis.cost
-                            + position_cost
-                            + shape_cost
-                            + radius_cost
-                            + acceleration_cost
-                            - 0.45 * max(0.0, min(6.0, group_evidence))
-                        ),
-                        missed=0,
-                        age=hypothesis.age + 1,
-                        last_timestamp=timestamp,
-                        predicted_only=False,
-                        group_evidence=group_evidence,
-                        last_collective_residual=detection.collective_residual,
+                and margin >= (
+                    _REAL_SWITCH_MARGIN
+                    + (
+                        8.0
+                        if current_track.lost_frames == 0
+                        and not current_track.predicted_only
+                        else 0.0
                     )
                 )
+                and identity_continuity_support
+                and motion_layout_support
+            )
+            if best_id != self.shadow_candidate_id:
+                self.shadow_candidate_id = best_id if qualifies else None
+                self.shadow_candidate_votes = [qualifies] if qualifies else []
+            elif self.shadow_candidate_id is not None:
+                self.shadow_candidate_votes.append(qualifies)
+                self.shadow_candidate_votes = self.shadow_candidate_votes[
+                    -_SHADOW_SWITCH_WINDOW:
+                ]
+            if (
+                self.shadow_candidate_id is not None
+                and len(self.shadow_candidate_votes) >= _SHADOW_SWITCH_VOTES
+                and sum(self.shadow_candidate_votes) >= _SHADOW_SWITCH_VOTES
+            ):
+                committed = self.tracks[self.shadow_candidate_id]
+                self.target_id = committed.id
+                self.last_outlier_real_xy = committed.state[:2]
+                self.shadow_candidate_id = None
+                self.shadow_candidate_votes.clear()
+                self.challenger_evidence.clear()
+                switched = True
+            elif current_track.lost_frames == 0:
+                self.last_outlier_real_xy = current_track.state[:2]
+            self.contamination_streak = 0
+            self.contamination_candidate = None
+            _apply_roles()
+            return switched
 
-        kept: list[_TargetHypothesis] = []
-        for candidate in sorted(branches, key=lambda item: item.cost):
-            if self._hypothesis_is_distinct(candidate, kept):
-                kept.append(candidate)
-                if len(kept) >= self.hypothesis_count:
-                    break
-        self.target_hypotheses = kept or sorted(branches, key=lambda item: item.cost)[:1]
-        return self.target_hypotheses[0] if self.target_hypotheses else None
+        if self.shadow_switch_enabled:
+            self.shadow_candidate_id = None
+            self.shadow_candidate_votes.clear()
+
+        self.challenger_evidence = {
+            track_id: evidence * _CHALLENGER_EVIDENCE_DECAY
+            for track_id, evidence in self.challenger_evidence.items()
+            if track_id in scores
+            and evidence * _CHALLENGER_EVIDENCE_DECAY >= 0.1
+        }
+        challenger = self.tracks.get(best_id)
+        challenger_ok = (
+            challenger is not None
+            and challenger.lost_frames == 0
+            and not challenger.predicted_only
+            and best_id in scores
+            # A shape already sliding off the panel cannot be the REAL one the
+            # cursor has to follow, and would strand the label once it exits.
+            and not self._leaving_frame(challenger)
+            and (
+                not self.multi_hypothesis_identity_enabled
+                or self._identity_paths_allow_switch(
+                    current_track, challenger
+                )
+            )
+        )
+        if best_id != self.target_id and challenger_ok:
+            margin = scores[best_id] - scores.get(self.target_id, -1e9)
+            # Current matched REAL needs a clearer four-cue lead to flip.
+            needed = _REAL_SWITCH_MARGIN
+            if current_track.lost_frames == 0 and not current_track.predicted_only:
+                needed += 8.0
+            if margin >= needed:
+                if self.contamination_candidate == best_id:
+                    self.contamination_streak += 1
+                else:
+                    self.contamination_candidate = best_id
+                    self.contamination_streak = 1
+                evidence = self.challenger_evidence.get(best_id, 0.0) + 1.0
+                self.challenger_evidence[best_id] = evidence
+                current_looks_like_bg = self._track_looks_like_background(
+                    current_track
+                )
+                evidence_needed = (
+                    _WEAK_REAL_EVIDENCE_NEEDED
+                    if current_looks_like_bg
+                    else _CHALLENGER_EVIDENCE_NEEDED
+                )
+                if (
+                    self.contamination_streak >= 3
+                    or evidence >= evidence_needed
+                ):
+                    self.target_id = best_id
+                    switched = True
+                    self.contamination_streak = 0
+                    self.contamination_candidate = None
+                    self.challenger_evidence.clear()
+                    self.last_outlier_real_xy = challenger.state[:2]
+            else:
+                self.contamination_streak = 0
+                self.contamination_candidate = None
+        else:
+            self.contamination_streak = 0
+            self.contamination_candidate = None
+            if current_track.lost_frames == 0:
+                self.last_outlier_real_xy = current_track.state[:2]
+
+        _apply_roles()
+        return switched
+
+    def _seed_real_from_bright(self, bright: ShapeDetection) -> None:
+        if not self.tracks:
+            return
+        # Once seeded, freeze REAL for the whole white phase.  Bright flicker /
+        # UI chrome must not steal the label.
+        if self.target_id is not None and self.target_id in self.tracks:
+            current = self.tracks[self.target_id]
+            if (
+                self.target_appearance_anchor is None
+                and current.appearance is not None
+            ):
+                self.target_appearance_anchor = current.appearance.copy()
+            # White phase: keep refreshing the geometric anchor at the seeded REAL.
+            self.last_outlier_real_xy = current.state[:2]
+            for track in self.tracks.values():
+                track.role = "real" if track.id == self.target_id else (
+                    "bg" if track.lost_frames <= 4 else "unknown"
+                )
+            return
+
+        # Opening target sits near panel center; prefer that when distances tie.
+        centers = [track.state[:2] for track in self.tracks.values()]
+        panel_center = (
+            float(np.mean([c[0] for c in centers])),
+            float(np.mean([c[1] for c in centers])),
+        )
+
+        def _seed_key(track: _ShapeTrack) -> tuple[float, float]:
+            bright_dist = math.hypot(
+                track.state[0] - bright.center[0],
+                track.state[1] - bright.center[1],
+            )
+            center_dist = math.hypot(
+                track.state[0] - panel_center[0],
+                track.state[1] - panel_center[1],
+            )
+            return (bright_dist, center_dist)
+
+        nearest = min(self.tracks.values(), key=_seed_key)
+        if math.hypot(
+            nearest.state[0] - bright.center[0],
+            nearest.state[1] - bright.center[1],
+        ) <= max(40.0, bright.radius * 0.9):
+            self.target_id = nearest.id
+            if (
+                self.target_appearance_anchor is None
+                and nearest.appearance is not None
+            ):
+                self.target_appearance_anchor = nearest.appearance.copy()
+            for track in self.tracks.values():
+                track.role = "real" if track.id == nearest.id else (
+                    "bg" if track.lost_frames <= 4 else "unknown"
+                )
 
     def update(
         self,
@@ -931,108 +2191,139 @@ class LieDetectorTracker:
     ) -> LieDetectorTrackingResult:
         if frame_bgr is None or frame_bgr.size == 0:
             raise ValueError("frame_bgr must be a non-empty BGR image")
+        self.frame_size = (int(frame_bgr.shape[1]), int(frame_bgr.shape[0]))
         timestamp = time.monotonic() if timestamp is None else float(timestamp)
         cleaned, _ = self._remove_cursor(frame_bgr)
         gray = cv2.cvtColor(cleaned, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(cleaned, cv2.COLOR_BGR2HSV)
+        self.identity_switched = False
 
-        initial = self._initial_bright_shape(gray, hsv)
-        initial_is_valid = (
-            initial is not None
-            and initial.score * 255.0 >= self.acquire_brightness
+        bright = self._initial_bright_shape(gray, hsv)
+        bright_valid = (
+            bright is not None and bright.score * 255.0 >= self.acquire_brightness
         )
-        if self.target_id is None:
-            if initial_is_valid:
-                aspect = initial.bbox[2] / max(1.0, initial.bbox[3])
+        allow_bright_seed = (
+            bright_valid
+            and bright is not None
+            and not self.white_phase_completed
+        )
+        if allow_bright_seed and bright is not None:
+            self.white_seen = True
+            self.white_active = True
+            self.white_absent_streak = 0
+            if self.target_kind is None:
+                aspect = bright.bbox[2] / max(1.0, bright.bbox[3])
                 self.target_kind = (
                     "circle"
-                    if initial.circularity >= 0.72 and 0.75 <= aspect <= 1.33
+                    if bright.circularity >= 0.72 and 0.75 <= aspect <= 1.33
                     else "contour"
                 )
-                self.target_contour = initial.contour.copy()
-                self.target_radius = float(initial.radius)
+                if bright.contour is not None:
+                    self.target_contour = bright.contour.copy()
+                self.target_radius = float(bright.radius)
+        else:
+            self.white_active = False
+            if self.white_seen and not self.white_phase_completed:
+                self.white_absent_streak += 1
+                # Opening highlights can flicker for several frames. Require a
+                # sustained absence before later bright UI is treated as DONE
+                # chrome rather than another seed observation.
+                if self.white_absent_streak >= 30:
+                    self.white_phase_completed = True
 
-        detections = (
-            self._circle_candidates(gray)
-            if self.target_kind in (None, "circle")
-            else self._contour_candidates(gray, self.target_contour)
-        )
-        if self.candidate_detector is not None and self.target_kind is not None:
+        detections: list[ShapeDetection] = []
+        if self.classical_candidates:
+            detections = (
+                self._circle_candidates(gray)
+                if self.target_kind in (None, "circle")
+                else self._contour_candidates(gray, self.target_contour)
+            )
+        if self.candidate_detector is not None:
             learned = self.candidate_detector.detect(cleaned, self.target_radius)
-            detections = self._fuse_learned_candidates(detections, learned)
-        if self.target_kind == "contour" and initial_is_valid:
-            detections.append(initial)
-        if self.target_kind == "contour":
-            self._annotate_collective_motion(detections)
-        self._associate(detections, timestamp)
-
-        if self.target_id is None and initial_is_valid and self.tracks:
-            nearest = min(
-                self.tracks.values(),
-                key=lambda track: math.hypot(
-                    track.state[0] - initial.center[0],
-                    track.state[1] - initial.center[1],
-                ),
-            )
-            if math.hypot(
-                nearest.state[0] - initial.center[0],
-                nearest.state[1] - initial.center[1],
-            ) <= max(30.0, initial.radius * 0.6):
-                self.target_id = nearest.id
-
-        contour_hypothesis: Optional[_TargetHypothesis] = None
-        if self.target_kind == "contour" and self.target_id is not None:
-            contour_target = self.tracks.get(self.target_id)
-            last_detection = None if contour_target is None else contour_target.last_detection
-            suspicious_match = (
-                contour_target is None
-                or contour_target.lost_frames >= 3
-            )
-            if not self.target_recovery_active and suspicious_match:
-                self.target_recovery_active = True
-                self.target_recovery_stable_frames = 0
-
-            if contour_target is not None and not self.target_recovery_active:
-                # The conservative primary association remains the committed
-                # path while measurements are strong. Its state continuously
-                # seeds velocity for a future ambiguous interval.
-                tx, ty, tradius = contour_target.state
-                anchor = ShapeDetection(
-                    center=(tx, ty),
-                    radius=tradius,
-                    bbox=(0, 0, 0, 0),
-                    source="anchor",
-                )
-                self._seed_target_hypothesis(anchor, timestamp)
+            if self.classical_candidates:
+                detections = self._fuse_learned_candidates(detections, learned)
             else:
-                contour_hypothesis = self._update_target_hypotheses(
-                    detections,
-                    timestamp,
-                    None,
+                detections = list(learned)
+            yolo_radii = [
+                float(item.observed_radius or item.radius)
+                for item in learned
+                if (item.observed_radius or item.radius) is not None
+            ]
+            if yolo_radii:
+                median_radius = float(np.median(np.asarray(yolo_radii)))
+                if self.target_radius is None:
+                    self.target_radius = median_radius
+                else:
+                    self.target_radius = 0.65 * float(self.target_radius) + (
+                        0.35 * median_radius
+                    )
+        if allow_bright_seed and bright is not None:
+            nearby = any(
+                math.hypot(
+                    detection.center[0] - bright.center[0],
+                    detection.center[1] - bright.center[1],
                 )
-                if (
-                    contour_target is not None
-                    and not contour_target.predicted_only
-                    and last_detection is not None
-                    and last_detection.shape_distance <= 0.60
-                ):
-                    self.target_recovery_stable_frames += 1
-                    if self.target_recovery_stable_frames >= 6:
-                        tx, ty, tradius = contour_target.state
-                        anchor = ShapeDetection(
-                            center=(tx, ty),
-                            radius=tradius,
-                            bbox=(0, 0, 0, 0),
-                            source="anchor",
-                        )
-                        self._seed_target_hypothesis(anchor, timestamp)
-                        self.target_recovery_active = False
-                        self.target_recovery_stable_frames = 0
-                        contour_hypothesis = None
-                elif self.target_recovery_active:
-                    self.target_recovery_stable_frames = 0
+                <= max(20.0, 0.55 * float(bright.radius))
+                for detection in detections
+            )
+            if not nearby:
+                detections.append(bright)
+        detections = self._limit_patterns(detections)
+
+        rotation_edges = self._rotation_edge_map(gray)
+        for detection in detections:
+            detection.rotation_descriptor = self._rotation_descriptor(
+                rotation_edges, detection
+            )
+            detection.appearance = self._appearance_descriptor(gray, detection)
+
+        self._annotate_collective_motion(detections)
+        reassociation_committed = self._associate(detections, timestamp)
+
+        if allow_bright_seed and bright is not None:
+            # White highlight only seeds / reaffirms REAL; do not reclassify yet.
+            self._seed_real_from_bright(bright)
+        elif self.white_seen:
+            # After fade: REAL = geometric outlier among the constellation.
+            self.identity_switched = (
+                self._assign_roles() or reassociation_committed
+            )
 
         target = self.tracks.get(self.target_id) if self.target_id is not None else None
+        if (
+            target is not None
+            and target.predicted_only
+            and self._outside_frame(target.state[:2])
+        ):
+            # Never report a coasting prediction that has left the panel.
+            target = None
+        constellation = [
+            ConstellationTrackView(
+                track_id=track.id,
+                center=(track.state[0], track.state[1]),
+                radius=track.state[2],
+                role=track.role,
+                orientation=track.orientation,
+                lost_frames=track.lost_frames,
+                translation_residual=track.translation_residual,
+                rotation_residual=track.rotation_residual,
+                velocity=track.predicted_velocity,
+                real_score=track.real_score,
+                rotation_score=track.rotation_score,
+                direction_score=track.direction_score,
+                speed_score=track.speed_score,
+                rigidity_score=track.rigidity_score,
+                motion_reliability=track.motion_reliability,
+                visible_streak=track.visible_streak,
+            )
+            for track in self.tracks.values()
+            if track.lost_frames <= self.max_lost_frames
+        ]
+        debug_tracks = [
+            (track.id, (track.state[0], track.state[1]), track.state[2], track.lost_frames)
+            for track in self.tracks.values()
+        ]
+
         if target is None:
             return LieDetectorTrackingResult(
                 acquired=False,
@@ -1043,81 +2334,52 @@ class LieDetectorTracker:
                 predicted_only=True,
                 lost_frames=0,
                 detections=detections,
-                tracks=[
-                    (track.id, track.state[:2], track.state[2], track.lost_frames)
-                    for track in self.tracks.values()
-                ],
+                tracks=debug_tracks,
                 hypothesis_count=len(self.target_hypotheses),
-                recovery_active=self.target_recovery_active,
-                collective_delta=tuple(float(value) for value in self.collective_delta),
-                collective_rotation_degrees=math.degrees(
-                    self.collective_rotation_delta
+                collective_delta=(
+                    float(self.collective_delta[0]),
+                    float(self.collective_delta[1]),
                 ),
+                white_active=self.white_active,
+                identity_window_active=self.shadow_candidate_id is not None,
+                identity_switched=self.identity_switched,
+                actionable=False,
+                constellation=constellation,
             )
 
-        collective_promoted = False
-        if contour_hypothesis is not None:
-            collective_candidate = min(
-                self.target_hypotheses,
-                key=lambda hypothesis: hypothesis.cost
-                - 0.75 * hypothesis.group_evidence,
+        x, y, radius = target.state
+        if not target.predicted_only and target.last_detection is not None:
+            x, y = target.last_detection.center
+            radius = float(
+                target.last_detection.observed_radius or target.last_detection.radius
             )
-            primary_center = np.asarray(target.state[:2], dtype=np.float64)
-            disagreement = float(
-                np.linalg.norm(collective_candidate.center - primary_center)
-            )
-            primary_residual = target.last_detection.collective_residual
-            collective_promoted = (
-                collective_candidate.group_evidence >= 10.0
-                and (
-                    target.lost_frames >= 3
-                    or (primary_residual <= 8.0 and disagreement >= 100.0)
-                )
-            )
-            contour_hypothesis = collective_candidate if collective_promoted else None
-
-        if contour_hypothesis is not None:
-            x, y = (float(value) for value in contour_hypothesis.center)
-            radius = float(contour_hypothesis.radius)
-            predicted_only = contour_hypothesis.predicted_only
-            lost_frames = contour_hypothesis.missed
-            confidence = math.exp(-0.16 * contour_hypothesis.missed) * math.exp(
-                -0.035 * min(20.0, contour_hypothesis.cost)
-            )
-        else:
-            x, y, radius = target.state
-            predicted_only = target.predicted_only
-            lost_frames = target.lost_frames
-            confidence = min(1.0, target.hits / 5.0) * math.exp(
-                -0.18 * target.lost_frames
-            )
-        debug_tracks = [
-            (track.id, track.state[:2], track.state[2], track.lost_frames)
-            for track in self.tracks.values()
-        ]
-        if contour_hypothesis is not None:
-            debug_tracks = [
-                (
-                    track_id,
-                    (x, y) if track_id == target.id else center,
-                    radius if track_id == target.id else track_radius,
-                    lost_frames if track_id == target.id else lost,
-                )
-                for track_id, center, track_radius, lost in debug_tracks
-            ]
+        confidence = min(1.0, target.hits / 5.0) * math.exp(-0.15 * target.lost_frames)
+        uncertainty = target.position_uncertainty
+        actionable = (
+            not target.predicted_only
+            or 4.0 * uncertainty <= max(8.0, float(radius))
+        )
         return LieDetectorTrackingResult(
             acquired=True,
             target_id=target.id,
-            center=(x, y),
-            radius=radius,
+            center=(float(x), float(y)),
+            radius=float(radius),
             confidence=float(confidence),
-            predicted_only=predicted_only,
-            lost_frames=lost_frames,
+            predicted_only=target.predicted_only,
+            lost_frames=target.lost_frames,
             detections=detections,
             tracks=debug_tracks,
             hypothesis_count=len(self.target_hypotheses),
-            recovery_active=self.target_recovery_active,
-            collective_promoted=collective_promoted,
-            collective_delta=tuple(float(value) for value in self.collective_delta),
-            collective_rotation_degrees=math.degrees(self.collective_rotation_delta),
+            collective_delta=(
+                float(self.collective_delta[0]),
+                float(self.collective_delta[1]),
+            ),
+            collective_rotation_degrees=float(target.rotation_residual),
+            recovery_active=target.predicted_only and not actionable,
+            white_active=self.white_active,
+            identity_window_active=self.shadow_candidate_id is not None,
+            identity_switched=self.identity_switched,
+            actionable=actionable,
+            position_uncertainty_px=uncertainty,
+            constellation=constellation,
         )

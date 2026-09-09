@@ -12,6 +12,7 @@ import logging
 import os
 import datetime
 import threading
+from dataclasses import replace
 
 # Library import
 import numpy as np
@@ -25,7 +26,8 @@ from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, n
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
     is_mac, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
-    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate, resize_window
+    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate, resize_window,
+    move_mouse_in_game_window
 )
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
@@ -36,6 +38,7 @@ else:
 from src.engine.HealthMonitor import HealthMonitor
 from src.engine.Profiler import Profiler
 from src.engine.RuneSolver import RuneSolver
+from src.engine.LieDetectorRuntime import LieDetectorRuntime
 from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.states.hunting import HuntingState
 from src.states.finding_rune import FindingRuneState
@@ -147,6 +150,10 @@ class MapleStoryAutoBot:
         self.health_monitor = None # Health monitor
         self.profiler = None # Profiler, for performance issue debugging
         self.rune_solver = None # Rune solver
+        self.lie_detector_runtime = None
+        self._lie_last_pointer_target = None
+        self._lie_jump_reject_streak = 0
+        self._lie_active_logged = False
 
         # Finite State Machine
         self.fsm = FiniteStateMachine()
@@ -262,6 +269,23 @@ class MapleStoryAutoBot:
         '''
         load_config
         '''
+        lie_cfg = cfg.setdefault("lie_detector", {})
+        lie_cfg.setdefault("enabled", True)
+        lie_cfg.setdefault("model", "models/lie_shape_yolo_manual.pt")
+        lie_cfg.setdefault("confidence", 0.28)
+        lie_cfg.setdefault("image_size", 768)
+        lie_cfg.setdefault("inference_stride", 1)
+        lie_cfg.setdefault("device", "")
+        lie_cfg.setdefault("multi_hypothesis_identity", True)
+        lie_cfg.setdefault("title_template", "misc/lie_detector_title_cn.png")
+        lie_cfg.setdefault("title_match_threshold", 0.70)
+        lie_cfg.setdefault("panel_confirm_frames", 2)
+        lie_cfg.setdefault("panel_miss_frames", 3)
+        lie_cfg.setdefault("max_pointer_jump", 160)
+        lie_cfg.setdefault("confirm_wait_seconds", 12.0)
+        lie_cfg.setdefault("confirm_click_interval", 0.8)
+        lie_cfg.setdefault("confirm_max_clicks", 6)
+
         # Backward-compatible defaults for custom YAML files created before
         # periodic chair rest existed.
         rest_cfg = cfg.setdefault("chair_rest", {})
@@ -465,6 +489,21 @@ class MapleStoryAutoBot:
                 self.kb.set_game_hwnd(_cap_hwnd)
             except Exception:
                 pass
+
+        self.lie_detector_runtime = None
+        if bool(self.cfg.get("lie_detector", {}).get("enabled", True)):
+            try:
+                self.lie_detector_runtime = LieDetectorRuntime(
+                    self.cfg["lie_detector"]
+                )
+                self.lie_detector_runtime.warm_up()
+                logger.info("[Lie Detector] Mouse-follow runtime ready.")
+            except Exception as exc:
+                self.lie_detector_runtime = None
+                logger.error(
+                    "[Lie Detector] Disabled because initialization failed: "
+                    f"{exc}"
+                )
 
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, self.kb)
@@ -3713,6 +3752,163 @@ class MapleStoryAutoBot:
 
         return completed_round
 
+    def _lie_content_frame(self):
+        """Title-free capture at the client's own resolution.
+
+        The lie pipeline deliberately runs on these raw pixels instead of
+        ``img_frame``: resizing to the working resolution blurs the panel's
+        title text and the ~13px 确认 button enough to break their detection.
+        """
+        title_h = int(self.cfg["game_window"].get("title_bar_height", 0))
+        if self.frame is None:
+            return None, 0
+        content = self.frame[title_h:, :]
+        if content.size == 0:
+            return None, 0
+        return content, title_h
+
+    def _lie_target_to_window_coord(self, target, title_h):
+        """Content-frame pixel -> window pixel (title bar included)."""
+        return (
+            int(round(float(target[0]))),
+            title_h + int(round(float(target[1]))),
+        )
+
+    def _lie_scale_result_for_debug(self, result, content):
+        """Rescale content-frame coordinates onto the debug canvas."""
+        engine_h, engine_w = self.img_frame_debug.shape[:2]
+        content_h, content_w = content.shape[:2]
+        scale_x = engine_w / max(1, content_w)
+        scale_y = engine_h / max(1, content_h)
+        if abs(scale_x - 1.0) < 1e-6 and abs(scale_y - 1.0) < 1e-6:
+            return result
+
+        def _point(point):
+            if point is None:
+                return None
+            return (point[0] * scale_x, point[1] * scale_y)
+
+        roi = result.panel_roi
+        if roi is not None:
+            roi = (
+                int(round(roi[0] * scale_x)),
+                int(round(roi[1] * scale_y)),
+                int(round(roi[2] * scale_x)),
+                int(round(roi[3] * scale_y)),
+            )
+        return replace(
+            result,
+            panel_roi=roi,
+            target_frame=_point(result.target_frame),
+            confirm_click=_point(result.confirm_click),
+        )
+
+    def _handle_lie_detector(self):
+        runtime = self.lie_detector_runtime
+        if runtime is None:
+            return False
+
+        content, title_h = self._lie_content_frame()
+        if content is None:
+            return False
+
+        result = runtime.update(content, time.monotonic())
+        runtime.draw_debug(
+            self.img_frame_debug,
+            self._lie_scale_result_for_debug(result, content),
+        )
+        if not result.engaged:
+            if self._lie_active_logged:
+                self.kb.automation_suspended = bool(
+                    getattr(self, "_lie_previous_automation_suspended", False)
+                )
+                if getattr(self, "_lie_health_was_enabled", False) \
+                        and self.health_monitor is not None:
+                    self.health_monitor.enable()
+                logger.info(
+                    "[Lie Detector] Challenge finished; normal automation "
+                    "resumed."
+                )
+            self._lie_active_logged = False
+            self._lie_last_pointer_target = None
+            self._lie_pending_pointer_target = None
+            self._lie_jump_reject_streak = 0
+            return False
+
+        if not self._lie_active_logged:
+            self._lie_previous_automation_suspended = bool(
+                getattr(self.kb, "automation_suspended", False)
+            )
+            self._lie_health_was_enabled = bool(
+                self.health_monitor is not None
+                and getattr(self.health_monitor, "enabled", False)
+            )
+            if self.health_monitor is not None:
+                self.health_monitor.disable()
+            self.kb._automation_suspend_keys_released = False
+            logger.warning(
+                "[Lie Detector] Panel detected; keyboard automation paused."
+            )
+            self._lie_active_logged = True
+
+        self.cmd_move_x = "none"
+        self.cmd_move_y = "none"
+        self.cmd_action = "none"
+        self.kb.set_command("none none none")
+        self.kb.release_all_key()
+        self.kb.automation_suspended = True
+
+        # The success dialog blocks the character until 确认 is pressed, so it
+        # is handled before (and instead of) any pointer following.
+        if result.confirm_click is not None:
+            window_coord = self._lie_target_to_window_coord(
+                result.confirm_click, title_h
+            )
+            logger.info(
+                f"[Lie Detector] Clicking 确认 at frame "
+                f"{tuple(round(v) for v in result.confirm_click)} "
+                f"(window {window_coord})."
+            )
+            if not self.is_disable_control:
+                click_in_game_window(self.capture.window_title, window_coord)
+            return True
+
+        target = result.target_frame
+        if target is not None:
+            max_jump = float(
+                self.cfg["lie_detector"].get("max_pointer_jump", 160)
+            )
+            previous = self._lie_last_pointer_target
+            if previous is not None:
+                jump = float(np.hypot(
+                    target[0] - previous[0], target[1] - previous[1]
+                ))
+                if jump > max_jump:
+                    pending = getattr(
+                        self, "_lie_pending_pointer_target", None
+                    )
+                    if pending is not None and np.hypot(
+                        target[0] - pending[0], target[1] - pending[1]
+                    ) <= 30.0:
+                        self._lie_jump_reject_streak += 1
+                    else:
+                        self._lie_pending_pointer_target = target
+                        self._lie_jump_reject_streak = 1
+                    if self._lie_jump_reject_streak < 2:
+                        target = None
+            if target is not None:
+                window_coord = self._lie_target_to_window_coord(
+                    target, title_h
+                )
+                move_mouse_in_game_window(
+                    self.capture.window_title, window_coord
+                )
+                self._lie_last_pointer_target = target
+                self._lie_pending_pointer_target = None
+                self._lie_jump_reject_streak = 0
+
+        return True
+
     def run_once(self):
         '''
         Process one game window frame
@@ -3906,6 +4102,26 @@ class MapleStoryAutoBot:
                 self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
 
         self.profiler.mark("Image Preprocessing")
+
+        # Lie-detector handling has priority over every gameplay state. Once
+        # its chrome is visible, release/disable keyboard input and process
+        # only the mouse-follow challenge until the panel disappears.
+        if self._handle_lie_detector():
+            try:
+                self.update_info_on_img_frame_debug()
+            except Exception:
+                pass
+            self._write_recording_frame()
+            if getattr(
+                self, "_should_emit_debug_to_cv2",
+                bool(self.is_show_debug_window),
+            ):
+                try:
+                    self.update_img_frame_debug()
+                except Exception:
+                    pass
+            self.t_last_frame = time.time()
+            return 0
 
         ###################
         ### Get Minimap ###

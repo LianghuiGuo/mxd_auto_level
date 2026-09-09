@@ -46,7 +46,19 @@ ml/dataset*/**
 ml/lie_dataset/images/
 ml/lie_dataset/labels/
 ml/lie_dataset_v2*/
+ml/lie_real_dataset/images/
 ml/lie_real_reviewed/images/
+ml/lie_manual_dataset/images/
+ml/videos/
 
-# Local evaluation reports are reproducible from ignored recordings.
+# Ultralytics caches and default run dirs (weights/plots; regenerable).
+*.cache
+runs/
+
+# Local evaluation / replay artifacts are reproducible from ignored recordings.
 log/lie_eval/
+log/lie_vis/
+log/lie_vis_*/
+log/lie_error_analysis/
+log/lie_manual_model_smoke/
+log/lie_replay_*.csv

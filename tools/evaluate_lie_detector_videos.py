@@ -18,8 +18,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.engine.LieDetectorTracker import LieDetectorTracker
-from src.engine.LieShapeYoloDetector import LieShapeYoloDetector
-from tools.lie_detector_replay import cursor_ground_truth, parse_roi
+from src.engine.LieShapeYoloDetector import (
+    DEFAULT_CONFIDENCE,
+    DEFAULT_IMAGE_SIZE,
+    DEFAULT_WEIGHTS,
+    LieShapeYoloDetector,
+)
+from tools.lie_detector_replay import (
+    EvaluationPhase,
+    cursor_ground_truth,
+    evaluation_phase,
+    parse_roi,
+)
 
 
 def _metrics(errors: list[float | None], times_ms: list[float]) -> dict[str, object]:
@@ -67,9 +77,10 @@ def main() -> int:
         default="val",
         help="which split to evaluate when --config is available",
     )
-    parser.add_argument("--model", type=Path, default=Path("models/lie_shape_yolo.pt"))
+    parser.add_argument("--model", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--roi", type=parse_roi, default=(290, 109, 700, 464))
-    parser.add_argument("--yolo-conf", type=float, default=0.01)
+    parser.add_argument("--yolo-conf", type=float, default=DEFAULT_CONFIDENCE)
+    parser.add_argument("--yolo-imgsz", type=int, default=DEFAULT_IMAGE_SIZE)
     parser.add_argument("--yolo-stride", type=int, default=1)
     parser.add_argument("--output", type=Path, default=Path("log/lie_eval/summary.json"))
     parser.add_argument("--csv", type=Path, default=Path("log/lie_eval/frames.csv"))
@@ -79,6 +90,7 @@ def main() -> int:
     # available we honour per-recording ROIs and, by default, evaluate only the
     # held-out 'val' split so we never self-evaluate on training clips.
     roi_by_name: dict[str, tuple[int, int, int, int]] = {}
+    active_window_by_name: dict[str, tuple[float, float]] = {}
     selected_names: set[str] | None = None
     if args.config.is_file():
         config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -86,6 +98,10 @@ def main() -> int:
         for entry in config["recordings"]:
             name = entry["filename"]
             roi_by_name[name] = tuple(int(v) for v in entry["roi"])
+            active_window_by_name[name] = (
+                float(entry.get("active_start", 0.0)),
+                float(entry.get("active_end", float("inf"))),
+            )
             if args.split == "all":
                 continue
             is_val = name in val_names
@@ -106,6 +122,7 @@ def main() -> int:
     learned_detector = LieShapeYoloDetector(
         args.model,
         confidence=args.yolo_conf,
+        image_size=args.yolo_imgsz,
         inference_stride=args.yolo_stride,
     )
     summaries: list[dict[str, object]] = []
@@ -120,6 +137,9 @@ def main() -> int:
         if not capture.isOpened():
             raise RuntimeError(f"unable to open {video}")
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
+        active_start, active_end = active_window_by_name.get(
+            video.name, (0.0, float("inf"))
+        )
         trackers = {
             "classical": LieDetectorTracker(),
             "hybrid": LieDetectorTracker(candidate_detector=learned_detector),
@@ -141,13 +161,15 @@ def main() -> int:
                 )
             frame = full_frame[y:y + height, x:x + width]
             ground_truth = cursor_ground_truth(frame)
+            timestamp = frame_index / fps
+            phase = evaluation_phase(timestamp, active_start, active_end)
             for name, tracker in trackers.items():
                 started = time.perf_counter()
-                result = tracker.update(frame, frame_index / fps)
+                result = tracker.update(frame, timestamp)
                 times[name].append((time.perf_counter() - started) * 1000.0)
                 if result.acquired and first_acquired_seconds[name] is None:
                     first_acquired_seconds[name] = frame_index / fps
-                if ground_truth is None:
+                if ground_truth is None or phase is not EvaluationPhase.ACTIVE:
                     continue
                 error = (
                     None
@@ -159,7 +181,8 @@ def main() -> int:
                     {
                         "video": video.name,
                         "frame": frame_index,
-                        "timestamp": f"{frame_index / fps:.6f}",
+                        "timestamp": f"{timestamp:.6f}",
+                        "evaluation_phase": phase.value,
                         "mode": name,
                         "acquired": int(result.acquired),
                         "predicted_only": int(result.predicted_only),

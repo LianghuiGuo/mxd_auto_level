@@ -988,6 +988,24 @@ def click_in_game_window(window_title, coord):
     pyautogui.click(loc_click)
     logger.info(f"[click_in_game_window] click at {loc_click}")
 
+
+def move_mouse_in_game_window(window_title, coord):
+    """Move the pointer to a game-window coordinate without clicking."""
+    if is_mac():
+        coord = (coord[0] // 2, coord[1] // 2 + 10)
+        region = get_window_region_mac(window_title)
+        if region is None:
+            raise RuntimeError(f"Cannot find window: {window_title}")
+        win_left, win_top = region["left"], region["top"]
+    else:
+        game_window = gw.getWindowsWithTitle(window_title)[0]
+        win_left, win_top = game_window.left, game_window.top
+
+    location = (win_left + int(coord[0]), win_top + int(coord[1]))
+    pyautogui.moveTo(*location, duration=0)
+    return location
+
+
 def send_email(email_addr, password,
                to, subject, body, attachment_path):
     '''

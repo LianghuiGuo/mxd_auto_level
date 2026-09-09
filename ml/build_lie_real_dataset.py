@@ -386,9 +386,16 @@ def _load_detector(model_path: Optional[Path], conf: float):
         return None
     if not model_path.is_file():
         raise FileNotFoundError(f"YOLO weights not found: {model_path}")
-    from src.engine.LieShapeYoloDetector import LieShapeYoloDetector
+    from src.engine.LieShapeYoloDetector import (
+        DEFAULT_IMAGE_SIZE,
+        LieShapeYoloDetector,
+    )
 
-    return LieShapeYoloDetector(model_path, confidence=conf)
+    return LieShapeYoloDetector(
+        model_path,
+        confidence=conf,
+        image_size=DEFAULT_IMAGE_SIZE,
+    )
 
 
 # --------------------------------------------------------------------------- #
