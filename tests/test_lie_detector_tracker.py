@@ -25,6 +25,41 @@ class LieDetectorTrackerTest(unittest.TestCase):
         self.assertLess(np.linalg.norm(np.subtract(result.center, (260, 180))), 12)
         self.assertTrue(any(view.role == "real" for view in result.constellation))
 
+    def test_stale_coast_recovery_requires_three_mature_votes(self):
+        tracker = LieDetectorTracker(stale_coast_recovery=True)
+        current = tracker._spawn(
+            ShapeDetection((100.0, 100.0), 40.0, (60, 60, 80, 80)),
+            0.0,
+        )
+        candidate = tracker._spawn(
+            ShapeDetection(
+                (145.0, 100.0),
+                40.0,
+                (105, 60, 80, 80),
+                appearance=np.asarray([1.0, 0.0], dtype=np.float32),
+            ),
+            0.0,
+        )
+        tracker.target_id = current.id
+        tracker.target_appearance_anchor = np.asarray(
+            [1.0, 0.0], dtype=np.float32
+        )
+        current.lost_frames = 11
+        current.predicted_only = True
+        candidate.visible_streak = 6
+        candidate.association_quality_history = [1.0, 1.0, 1.0]
+        tracker._score_real_candidates = lambda: {candidate.id: 100.0}
+
+        self.assertFalse(tracker._assign_roles())
+        self.assertFalse(tracker._assign_roles())
+        self.assertTrue(tracker._assign_roles())
+        self.assertEqual(tracker.target_id, candidate.id)
+        self.assertTrue(tracker.stale_recovery_committed)
+        self.assertGreater(
+            tracker.stale_recovery_appearance_protect_frames,
+            0,
+        )
+
     def test_preserves_target_id_while_circle_moves(self):
         tracker = LieDetectorTracker(min_radius=30, max_radius=70, hough_param2=22)
         target_id = None

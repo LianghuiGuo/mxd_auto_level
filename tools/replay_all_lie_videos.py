@@ -9,23 +9,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
-CLIP_NUMBERS = list(range(1, 12))
 METRIC_KEYS = (
     "within_40px_ratio",
     "within_radius_active_ratio",
     "median_error_px",
     "p95_error_px",
     "identity_switches",
+    "ranker_switches",
     "evaluated_frames",
     "evaluated_error_frames",
     "prediction_coverage_ratio",
     "acquired_frame_ratio",
     "actionable_frame_ratio",
 )
+
+
+def discover_clip_numbers(videos: Path) -> list[int]:
+    numbers = []
+    for path in videos.glob("测谎录屏*.mp4"):
+        match = re.fullmatch(r"测谎录屏(\d+)", path.stem)
+        if match is not None:
+            numbers.append(int(match.group(1)))
+    return sorted(set(numbers))
 
 
 def main() -> int:
@@ -42,13 +52,23 @@ def main() -> int:
     parser.add_argument("--shadow-switch", action="store_true")
     parser.add_argument("--provisional-reassociation", action="store_true")
     parser.add_argument("--multi-hypothesis-identity", action="store_true")
+    parser.add_argument("--background-certificates", action="store_true")
+    parser.add_argument("--stale-coast-recovery", action="store_true")
+    parser.add_argument("--identity-ranker-model", type=Path, default=None)
+    parser.add_argument("--identity-ranker-min-margin", type=float, default=2.00)
     parser.add_argument(
         "--clips",
-        default=",".join(str(number) for number in CLIP_NUMBERS),
-        help="comma-separated clip numbers",
+        default=None,
+        help="comma-separated clip numbers; default: every recording in --videos",
     )
     args = parser.parse_args()
-    clip_numbers = [int(value) for value in args.clips.split(",") if value.strip()]
+    clip_numbers = (
+        [int(value) for value in args.clips.split(",") if value.strip()]
+        if args.clips is not None
+        else discover_clip_numbers(args.videos)
+    )
+    if not clip_numbers:
+        parser.error(f"no lie-detector recordings found in {args.videos}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     args.summary.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +97,17 @@ def main() -> int:
             command.append("--provisional-reassociation")
         if args.multi_hypothesis_identity:
             command.append("--multi-hypothesis-identity")
+        if args.background_certificates:
+            command.append("--background-certificates")
+        if args.stale_coast_recovery:
+            command.append("--stale-coast-recovery")
+        if args.identity_ranker_model is not None:
+            command += [
+                "--identity-ranker-model",
+                str(args.identity_ranker_model),
+                "--identity-ranker-min-margin",
+                str(args.identity_ranker_min_margin),
+            ]
         finished = subprocess.run(command, capture_output=True, text=True)
         if finished.returncode != 0:
             print(finished.stdout[-2000:], flush=True)

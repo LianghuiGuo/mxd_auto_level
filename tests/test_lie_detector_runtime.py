@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -143,6 +144,33 @@ class LieDetectorRuntimeTest(unittest.TestCase):
 
         self.assertTrue(result.engaged)
         self.assertIsNone(result.target_frame)
+
+    @patch("src.engine.LieDetectorRuntime.LieDetectorTracker")
+    @patch("src.engine.LieDetectorRuntime.LieShapeYoloDetector")
+    def test_ranker_config_is_forwarded_to_online_tracker(
+        self,
+        detector_class,
+        tracker_class,
+    ):
+        detector = detector_class.return_value
+        tracker = tracker_class.return_value
+        runtime = LieDetectorRuntime(
+            {
+                "identity_ranker_model": "models/lie_identity_ranker.txt",
+                "identity_ranker_min_margin": 2.0,
+                "multi_hypothesis_identity": True,
+                "stale_coast_recovery": True,
+            }
+        )
+
+        self.assertIs(runtime._ensure_tracker(), tracker)
+        tracker_class.assert_called_once_with(
+            candidate_detector=detector,
+            multi_hypothesis_identity=True,
+            stale_coast_recovery=True,
+            identity_ranker_model="models/lie_identity_ranker.txt",
+            identity_ranker_min_margin=2.0,
+        )
 
     def test_short_panel_miss_holds_before_confirm_phase(self):
         tracker = _FakeTracker()

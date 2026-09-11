@@ -73,6 +73,160 @@
       "duration": 16.74
     },
     {
+      "filename": "测谎录屏12.mp4",
+      "roi": [
+        295,
+        113,
+        690,
+        466
+      ],
+      "safe_crop": [
+        13,
+        9,
+        664,
+        448
+      ],
+      "seed_time": 5.93,
+      "active_start": 0.0,
+      "active_end": 11.18,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 14,
+      "duration": 13.18
+    },
+    {
+      "filename": "测谎录屏13.mp4",
+      "roi": [
+        294,
+        113,
+        694,
+        463
+      ],
+      "safe_crop": [
+        13,
+        9,
+        668,
+        445
+      ],
+      "seed_time": 2.71,
+      "active_start": 0.0,
+      "active_end": 12.40,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 23,
+      "duration": 14.93
+    },
+    {
+      "filename": "测谎录屏14.mp4",
+      "roi": [
+        295,
+        97,
+        692,
+        478
+      ],
+      "safe_crop": [
+        13,
+        9,
+        666,
+        460
+      ],
+      "seed_time": 2.71,
+      "active_start": 0.0,
+      "active_end": 16.27,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 16,
+      "duration": 18.57
+    },
+    {
+      "filename": "测谎录屏15.mp4",
+      "roi": [
+        295,
+        98,
+        692,
+        478
+      ],
+      "safe_crop": [
+        13,
+        9,
+        666,
+        460
+      ],
+      "seed_time": 4.44,
+      "active_start": 0.0,
+      "active_end": 16.34,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 26,
+      "duration": 17.96
+    },
+    {
+      "filename": "测谎录屏16.mp4",
+      "roi": [
+        294,
+        96,
+        692,
+        478
+      ],
+      "safe_crop": [
+        13,
+        9,
+        666,
+        460
+      ],
+      "seed_time": 9.56,
+      "active_start": 0.0,
+      "active_end": 16.4,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 15,
+      "duration": 17.37
+    },
+    {
+      "filename": "测谎录屏17.mp4",
+      "roi": [
+        295,
+        115,
+        690,
+        462
+      ],
+      "safe_crop": [
+        13,
+        9,
+        664,
+        444
+      ],
+      "seed_time": 2.87,
+      "active_start": 0.0,
+      "active_end": 10.4,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 21,
+      "duration": 13.32
+    },
+    {
+      "filename": "测谎录屏19.mp4",
+      "roi": [
+        294,
+        113,
+        692,
+        463
+      ],
+      "safe_crop": [
+        13,
+        9,
+        666,
+        445
+      ],
+      "seed_time": 3.46,
+      "active_start": 0.0,
+      "active_end": 11.80,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 24,
+      "duration": 16.14
+    },
+    {
       "filename": "测谎录屏2.mp4",
       "roi": [
         287,
@@ -93,6 +247,28 @@
       "auto_detected": false,
       "roi_probe_hits": 8,
       "duration": 19.31
+    },
+    {
+      "filename": "测谎录屏20.mp4",
+      "roi": [
+        295,
+        113,
+        690,
+        461
+      ],
+      "safe_crop": [
+        13,
+        9,
+        664,
+        443
+      ],
+      "seed_time": 5.80,
+      "active_start": 0.0,
+      "active_end": 11.80,
+      "family": "unknown",
+      "auto_detected": true,
+      "roi_probe_hits": 8,
+      "duration": 15.49
     },
     {
       "filename": "测谎录屏3.mp4",

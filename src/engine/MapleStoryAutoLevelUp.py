@@ -277,6 +277,11 @@ class MapleStoryAutoBot:
         lie_cfg.setdefault("inference_stride", 1)
         lie_cfg.setdefault("device", "")
         lie_cfg.setdefault("multi_hypothesis_identity", True)
+        lie_cfg.setdefault("stale_coast_recovery", True)
+        lie_cfg.setdefault(
+            "identity_ranker_model", "models/lie_identity_ranker.txt"
+        )
+        lie_cfg.setdefault("identity_ranker_min_margin", 2.00)
         lie_cfg.setdefault("title_template", "misc/lie_detector_title_cn.png")
         lie_cfg.setdefault("title_match_threshold", 0.70)
         lie_cfg.setdefault("panel_confirm_frames", 2)

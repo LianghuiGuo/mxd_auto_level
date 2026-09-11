@@ -22,6 +22,9 @@ from typing import Iterable, Literal, Optional, Protocol
 import cv2
 import numpy as np
 
+from src.engine.LieBackgroundCertificates import LieBackgroundCertificates
+from src.engine.LieIdentityRanker import TrajectoryIdentityRanker
+
 try:
     from scipy.optimize import linear_sum_assignment
 except ImportError:  # pragma: no cover
@@ -79,6 +82,12 @@ _IDENTITY_FAR_SWITCH_DISTANCE = 130.0
 _IDENTITY_UNVALIDATED_RECOVERY_VOTES = 4
 _IDENTITY_EXTREME_RECOVERY_DISTANCE = 400.0
 _IDENTITY_EXTREME_RECOVERY_VOTES = 2
+_STALE_RECOVERY_MAX_APPEARANCE_ERROR = 0.07
+_STALE_RECOVERY_HOLD_FRAMES = 12
+_STALE_RECOVERY_APPEARANCE_PROTECT_FRAMES = 60
+_RANKER_MIN_MARGIN = 2.00
+_RANKER_SWITCH_VOTES = 5
+_RANKER_RECOVERY_VOTES = 3
 _IDENTITY_SWITCH_COOLDOWN = 10
 TrackRole = Literal["real", "bg", "unknown"]
 
@@ -98,6 +107,7 @@ class ShapeDetection:
     orientation_confidence: float = 0.0
     collective_rotation_residual: float = 0.0
     yolo_confidence: float = 0.0
+    bg_certified: bool = False
     contour: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     appearance: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
     rotation_descriptor: Optional[np.ndarray] = field(
@@ -134,6 +144,13 @@ class ConstellationTrackView:
     rigidity_score: float = 0.0
     motion_reliability: float = 0.0
     visible_streak: int = 0
+    angular_velocity: float = 0.0
+    appearance_distance: float = 2.0
+    association_quality: float = 0.0
+    yolo_confidence: float = 0.0
+    predicted_only: bool = False
+    bg_certified: bool = False
+    ranker_score: float = 0.0
 
 
 @dataclass
@@ -157,6 +174,12 @@ class LieDetectorTrackingResult:
     identity_switched: bool = False
     actionable: bool = False
     position_uncertainty_px: float = 0.0
+    bg_registry_state: str = "dormant"
+    bg_certified_count: int = 0
+    stale_recovery_committed: bool = False
+    ranker_candidate_id: Optional[int] = None
+    ranker_margin: float = 0.0
+    ranker_switched: bool = False
     constellation: list[ConstellationTrackView] = field(default_factory=list)
 
 
@@ -263,6 +286,7 @@ class _ShapeTrack:
         self.speed_score = 0.0
         self.rigidity_score = 0.0
         self.appearance_score = 0.0
+        self.ranker_score = 0.0
 
     def _set_transition(self, dt: float) -> None:
         dt = float(np.clip(dt, 1.0 / 120.0, 0.25))
@@ -462,6 +486,10 @@ class LieDetectorTracker:
         shadow_switch: bool = False,
         provisional_reassociation: bool = False,
         multi_hypothesis_identity: bool = False,
+        background_certificates: bool = False,
+        stale_coast_recovery: bool = False,
+        identity_ranker_model: Optional[str] = None,
+        identity_ranker_min_margin: float = _RANKER_MIN_MARGIN,
     ) -> None:
         self.min_radius = int(min_radius)
         self.max_radius = int(max_radius)
@@ -480,6 +508,16 @@ class LieDetectorTracker:
         self.provisional_reassociation_enabled = bool(provisional_reassociation)
         self.multi_hypothesis_identity_enabled = bool(
             multi_hypothesis_identity
+        )
+        self.background_certificates_enabled = bool(background_certificates)
+        self.stale_coast_recovery_enabled = bool(stale_coast_recovery)
+        self.identity_ranker = (
+            None
+            if not identity_ranker_model
+            else TrajectoryIdentityRanker(identity_ranker_model)
+        )
+        self.identity_ranker_min_margin = max(
+            0.0, float(identity_ranker_min_margin)
         )
         self.reset()
 
@@ -518,6 +556,20 @@ class LieDetectorTracker:
         self.identity_unvalidated_candidate_id: Optional[int] = None
         self.identity_unvalidated_candidate_streak = 0
         self.identity_unvalidated_center: Optional[tuple[float, float]] = None
+        self.background_certificates = LieBackgroundCertificates()
+        self.bg_registry_state = "dormant"
+        self.bg_certified_count = 0
+        self.stale_recovery_candidate_id: Optional[int] = None
+        self.stale_recovery_streak = 0
+        self.stale_recovery_committed = False
+        self.stale_recovery_hold_frames = 0
+        self.stale_recovery_appearance_protect_frames = 0
+        self.ranker_candidate_id: Optional[int] = None
+        self.ranker_candidate_streak = 0
+        self.ranker_margin = 0.0
+        self.ranker_switched = False
+        if self.identity_ranker is not None:
+            self.identity_ranker.reset()
         if self.candidate_detector is not None:
             self.candidate_detector.reset()
 
@@ -1020,6 +1072,45 @@ class LieDetectorTracker:
             detection.collective_residual = float(position_residuals[index])
         self.previous_centers = current
         self.previous_orientations = current_orient
+
+    def _update_background_certificates(
+        self,
+        detections: list[ShapeDetection],
+        bright: Optional[ShapeDetection],
+        allow_bright_seed: bool,
+    ) -> None:
+        """Carry only unambiguous white-phase BG provenance forward."""
+        for detection in detections:
+            detection.bg_certified = False
+        if not self.background_certificates_enabled:
+            return
+        target = (
+            self.tracks.get(self.target_id)
+            if self.target_id is not None
+            else None
+        )
+        real_center = (
+            bright.center
+            if bright is not None and allow_bright_seed
+            else (target.state[:2] if target is not None else None)
+        )
+        real_radius = (
+            bright.radius
+            if bright is not None and allow_bright_seed
+            else (target.state[2] if target is not None else 0.0)
+        )
+        result = self.background_certificates.update(
+            [detection.center for detection in detections],
+            white_active=allow_bright_seed,
+            real_center=real_center,
+            real_radius=real_radius,
+            frame_size=self.frame_size,
+        )
+        self.bg_registry_state = result.state
+        self.bg_certified_count = len(result.certified_indices)
+        for index in result.certified_indices:
+            if 0 <= index < len(detections):
+                detections[index].bg_certified = True
 
     @staticmethod
     def _hungarian(cost: np.ndarray) -> list[tuple[int, int]]:
@@ -1905,7 +1996,132 @@ class LieDetectorTracker:
         )
         return self.identity_unvalidated_candidate_streak >= votes_needed
 
-    def _assign_roles(self) -> bool:
+    def _constellation_views(self) -> list[ConstellationTrackView]:
+        return [
+            ConstellationTrackView(
+                track_id=track.id,
+                center=(track.state[0], track.state[1]),
+                radius=track.state[2],
+                role=track.role,
+                orientation=track.orientation,
+                lost_frames=track.lost_frames,
+                translation_residual=track.translation_residual,
+                rotation_residual=track.rotation_residual,
+                velocity=track.predicted_velocity,
+                real_score=track.real_score,
+                rotation_score=track.rotation_score,
+                direction_score=track.direction_score,
+                speed_score=track.speed_score,
+                rigidity_score=track.rigidity_score,
+                motion_reliability=track.motion_reliability,
+                visible_streak=track.visible_streak,
+                angular_velocity=track.angular_velocity,
+                appearance_distance=min(
+                    2.0,
+                    self._appearance_distance(
+                        self.target_appearance_anchor,
+                        track.appearance,
+                    ),
+                ),
+                association_quality=(
+                    float(
+                        np.median(
+                            np.asarray(
+                                track.association_quality_history[-3:],
+                                dtype=np.float32,
+                            )
+                        )
+                    )
+                    if track.association_quality_history
+                    else 0.0
+                ),
+                yolo_confidence=(
+                    float(track.last_detection.yolo_confidence)
+                    if track.last_detection is not None
+                    else 0.0
+                ),
+                predicted_only=track.predicted_only,
+                bg_certified=(
+                    bool(track.last_detection.bg_certified)
+                    if track.last_detection is not None
+                    else False
+                ),
+                ranker_score=track.ranker_score,
+            )
+            for track in self.tracks.values()
+            if track.lost_frames <= self.max_lost_frames
+        ]
+
+    def _ranker_switch_candidate(
+        self,
+        current_track: Optional[_ShapeTrack],
+        gray: Optional[np.ndarray] = None,
+    ) -> Optional[_ShapeTrack]:
+        self.ranker_margin = 0.0
+        if self.identity_ranker is None or self.frame_size is None:
+            return None
+        width, height = self.frame_size
+        ranker_scores = self.identity_ranker.update(
+            self._constellation_views(),
+            target_id=self.target_id,
+            frame_width=width,
+            frame_height=height,
+            gray_frame=gray,
+        )
+        for track in self.tracks.values():
+            track.ranker_score = float(ranker_scores.get(track.id, 0.0))
+        if len(ranker_scores) < 2:
+            self.ranker_candidate_id = None
+            self.ranker_candidate_streak = 0
+            return None
+        ranked = sorted(
+            ranker_scores.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        best_id, best_score = ranked[0]
+        self.ranker_margin = float(best_score - ranked[1][1])
+        if best_id == self.target_id or self.ranker_margin < self.identity_ranker_min_margin:
+            self.ranker_candidate_id = None
+            self.ranker_candidate_streak = 0
+            return None
+        candidate = self.tracks.get(best_id)
+        qualifies = (
+            candidate is not None
+            and candidate.lost_frames == 0
+            and not candidate.predicted_only
+            and candidate.visible_streak >= 5
+            and candidate.motion_reliability >= 0.10
+            and not self._leaving_frame(candidate)
+            and (
+                current_track is None
+                or not self.multi_hypothesis_identity_enabled
+                or self._identity_paths_allow_switch(current_track, candidate)
+            )
+        )
+        if not qualifies:
+            self.ranker_candidate_id = None
+            self.ranker_candidate_streak = 0
+            return None
+        if self.ranker_candidate_id == best_id:
+            self.ranker_candidate_streak += 1
+        else:
+            self.ranker_candidate_id = best_id
+            self.ranker_candidate_streak = 1
+        votes_needed = (
+            _RANKER_RECOVERY_VOTES
+            if current_track is None
+            or current_track.lost_frames > _REAL_COAST_GRACE
+            or current_track.predicted_only
+            else _RANKER_SWITCH_VOTES
+        )
+        return (
+            candidate
+            if self.ranker_candidate_streak >= votes_needed
+            else None
+        )
+
+    def _assign_roles(self, gray: Optional[np.ndarray] = None) -> bool:
         """Label REAL from four-cue scores after white fade."""
         scores = self._score_real_candidates()
         if self.multi_hypothesis_identity_enabled:
@@ -1914,6 +2130,8 @@ class LieDetectorTracker:
         current_track = (
             self.tracks.get(self.target_id) if self.target_id is not None else None
         )
+        if self.stale_recovery_appearance_protect_frames > 0:
+            self.stale_recovery_appearance_protect_frames -= 1
 
         def _apply_roles() -> None:
             for track in self.tracks.values():
@@ -1958,6 +2176,45 @@ class LieDetectorTracker:
             _apply_roles()
             return switched
 
+        ranker_candidate = self._ranker_switch_candidate(current_track, gray)
+        if ranker_candidate is not None:
+            recovery_protects_current = False
+            if (
+                self.stale_recovery_appearance_protect_frames > 0
+                and current_track is not None
+                and current_track.lost_frames == 0
+                and not current_track.predicted_only
+            ):
+                current_appearance_error = self._appearance_distance(
+                    self.target_appearance_anchor,
+                    current_track.appearance,
+                )
+                challenger_appearance_error = self._appearance_distance(
+                    self.target_appearance_anchor,
+                    ranker_candidate.appearance,
+                )
+                recovery_protects_current = (
+                    current_appearance_error <= 0.07
+                    and challenger_appearance_error
+                    >= current_appearance_error + 0.015
+                )
+            if not recovery_protects_current:
+                self.target_id = ranker_candidate.id
+                self.last_outlier_real_xy = ranker_candidate.state[:2]
+                self.ranker_candidate_id = None
+                self.ranker_candidate_streak = 0
+                self.ranker_switched = True
+                self.identity_switch_cooldown = _IDENTITY_SWITCH_COOLDOWN
+                self.contamination_streak = 0
+                self.contamination_candidate = None
+                self.challenger_evidence.clear()
+                self.shadow_candidate_id = None
+                self.shadow_candidate_votes.clear()
+                _apply_roles()
+                return True
+            self.ranker_candidate_id = None
+            self.ranker_candidate_streak = 0
+
         healthy = (
             current_track is not None
             and current_track.lost_frames <= _REAL_COAST_GRACE
@@ -1968,13 +2225,81 @@ class LieDetectorTracker:
             if current_track is None and best_id != self.target_id:
                 self.target_id = best_id
                 switched = True
+            elif (
+                self.stale_coast_recovery_enabled
+                and current_track is not None
+                and current_track.lost_frames > _REAL_COAST_GRACE
+            ):
+                candidate = self.tracks.get(best_id)
+                distance = (
+                    float("inf")
+                    if candidate is None
+                    else math.hypot(
+                        candidate.state[0] - current_track.state[0],
+                        candidate.state[1] - current_track.state[1],
+                    )
+                )
+                appearance_error = (
+                    float("inf")
+                    if candidate is None
+                    else self._appearance_distance(
+                        self.target_appearance_anchor,
+                        candidate.appearance,
+                    )
+                )
+                qualifies = (
+                    candidate is not None
+                    and candidate.lost_frames == 0
+                    and not candidate.predicted_only
+                    and candidate.visible_streak >= 5
+                    and candidate.motion_reliability >= 0.15
+                    and not self._leaving_frame(candidate)
+                    and distance
+                    <= 140.0 + 8.0 * min(current_track.lost_frames, 6)
+                    and appearance_error
+                    <= _STALE_RECOVERY_MAX_APPEARANCE_ERROR
+                )
+                if qualifies:
+                    if self.stale_recovery_candidate_id == best_id:
+                        self.stale_recovery_streak += 1
+                    else:
+                        self.stale_recovery_candidate_id = best_id
+                        self.stale_recovery_streak = 1
+                    if self.stale_recovery_streak >= 3:
+                        self.target_id = best_id
+                        self.last_outlier_real_xy = candidate.state[:2]
+                        self.stale_recovery_committed = True
+                        self.stale_recovery_hold_frames = (
+                            _STALE_RECOVERY_HOLD_FRAMES
+                        )
+                        self.stale_recovery_appearance_protect_frames = (
+                            _STALE_RECOVERY_APPEARANCE_PROTECT_FRAMES
+                        )
+                        switched = True
+                else:
+                    self.stale_recovery_candidate_id = None
+                    self.stale_recovery_streak = 0
             self.contamination_streak = 0
             self.contamination_candidate = None
             self.challenger_evidence.clear()
             self.shadow_candidate_id = None
             self.shadow_candidate_votes.clear()
+            if switched:
+                self.stale_recovery_candidate_id = None
+                self.stale_recovery_streak = 0
             _apply_roles()
             return switched
+
+        if self.stale_recovery_hold_frames > 0:
+            self.stale_recovery_hold_frames -= 1
+            self.contamination_streak = 0
+            self.contamination_candidate = None
+            self.challenger_evidence.clear()
+            self.identity_unvalidated_candidate_id = None
+            self.identity_unvalidated_candidate_streak = 0
+            self.identity_unvalidated_center = None
+            _apply_roles()
+            return False
 
         shadow_margin = scores.get(best_id, -1e9) - scores.get(
             self.target_id, -1e9
@@ -2071,11 +2396,33 @@ class LieDetectorTracker:
             and evidence * _CHALLENGER_EVIDENCE_DECAY >= 0.1
         }
         challenger = self.tracks.get(best_id)
+        recovery_protects_current = False
+        if (
+            self.stale_recovery_appearance_protect_frames > 0
+            and current_track is not None
+            and challenger is not None
+            and current_track.lost_frames == 0
+            and not current_track.predicted_only
+        ):
+            current_appearance_error = self._appearance_distance(
+                self.target_appearance_anchor,
+                current_track.appearance,
+            )
+            challenger_appearance_error = self._appearance_distance(
+                self.target_appearance_anchor,
+                challenger.appearance,
+            )
+            recovery_protects_current = (
+                current_appearance_error <= 0.07
+                and challenger_appearance_error
+                >= current_appearance_error + 0.015
+            )
         challenger_ok = (
             challenger is not None
             and challenger.lost_frames == 0
             and not challenger.predicted_only
             and best_id in scores
+            and not recovery_protects_current
             # A shape already sliding off the panel cannot be the REAL one the
             # cursor has to follow, and would strand the label once it exits.
             and not self._leaving_frame(challenger)
@@ -2197,6 +2544,8 @@ class LieDetectorTracker:
         gray = cv2.cvtColor(cleaned, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(cleaned, cv2.COLOR_BGR2HSV)
         self.identity_switched = False
+        self.stale_recovery_committed = False
+        self.ranker_switched = False
 
         bright = self._initial_bright_shape(gray, hsv)
         bright_valid = (
@@ -2279,6 +2628,9 @@ class LieDetectorTracker:
 
         self._annotate_collective_motion(detections)
         reassociation_committed = self._associate(detections, timestamp)
+        self._update_background_certificates(
+            detections, bright, allow_bright_seed
+        )
 
         if allow_bright_seed and bright is not None:
             # White highlight only seeds / reaffirms REAL; do not reclassify yet.
@@ -2286,7 +2638,7 @@ class LieDetectorTracker:
         elif self.white_seen:
             # After fade: REAL = geometric outlier among the constellation.
             self.identity_switched = (
-                self._assign_roles() or reassociation_committed
+                self._assign_roles(gray) or reassociation_committed
             )
 
         target = self.tracks.get(self.target_id) if self.target_id is not None else None
@@ -2297,28 +2649,7 @@ class LieDetectorTracker:
         ):
             # Never report a coasting prediction that has left the panel.
             target = None
-        constellation = [
-            ConstellationTrackView(
-                track_id=track.id,
-                center=(track.state[0], track.state[1]),
-                radius=track.state[2],
-                role=track.role,
-                orientation=track.orientation,
-                lost_frames=track.lost_frames,
-                translation_residual=track.translation_residual,
-                rotation_residual=track.rotation_residual,
-                velocity=track.predicted_velocity,
-                real_score=track.real_score,
-                rotation_score=track.rotation_score,
-                direction_score=track.direction_score,
-                speed_score=track.speed_score,
-                rigidity_score=track.rigidity_score,
-                motion_reliability=track.motion_reliability,
-                visible_streak=track.visible_streak,
-            )
-            for track in self.tracks.values()
-            if track.lost_frames <= self.max_lost_frames
-        ]
+        constellation = self._constellation_views()
         debug_tracks = [
             (track.id, (track.state[0], track.state[1]), track.state[2], track.lost_frames)
             for track in self.tracks.values()
@@ -2344,6 +2675,12 @@ class LieDetectorTracker:
                 identity_window_active=self.shadow_candidate_id is not None,
                 identity_switched=self.identity_switched,
                 actionable=False,
+                bg_registry_state=self.bg_registry_state,
+                bg_certified_count=self.bg_certified_count,
+                stale_recovery_committed=self.stale_recovery_committed,
+                ranker_candidate_id=self.ranker_candidate_id,
+                ranker_margin=self.ranker_margin,
+                ranker_switched=self.ranker_switched,
                 constellation=constellation,
             )
 
@@ -2381,5 +2718,11 @@ class LieDetectorTracker:
             identity_switched=self.identity_switched,
             actionable=actionable,
             position_uncertainty_px=uncertainty,
+            bg_registry_state=self.bg_registry_state,
+            bg_certified_count=self.bg_certified_count,
+            stale_recovery_committed=self.stale_recovery_committed,
+            ranker_candidate_id=self.ranker_candidate_id,
+            ranker_margin=self.ranker_margin,
+            ranker_switched=self.ranker_switched,
             constellation=constellation,
         )

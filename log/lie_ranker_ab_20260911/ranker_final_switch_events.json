@@ -1,0 +1,338 @@
+[
+  {
+    "video": "录屏10",
+    "frame": 69,
+    "time": 2.07003,
+    "margin": 2.609299,
+    "before": 27.414,
+    "after": 47.155
+  },
+  {
+    "video": "录屏10",
+    "frame": 133,
+    "time": 3.990058,
+    "margin": 2.901584,
+    "before": 24.562,
+    "after": 5.546
+  },
+  {
+    "video": "录屏10",
+    "frame": 145,
+    "time": 4.350064,
+    "margin": 2.887801,
+    "before": 45.537,
+    "after": 13.238
+  },
+  {
+    "video": "录屏14",
+    "frame": 260,
+    "time": 7.813393,
+    "margin": 2.688538,
+    "before": 18.631,
+    "after": 22.662
+  },
+  {
+    "video": "录屏14",
+    "frame": 322,
+    "time": 9.676586,
+    "margin": 4.444577,
+    "before": 38.185,
+    "after": 12.944
+  },
+  {
+    "video": "录屏14",
+    "frame": 502,
+    "time": 15.085858,
+    "margin": 2.719065,
+    "before": 10.05,
+    "after": 24.309
+  },
+  {
+    "video": "录屏15",
+    "frame": 280,
+    "time": 8.409287,
+    "margin": 3.246274,
+    "before": 180.366,
+    "after": 15.049
+  },
+  {
+    "video": "录屏15",
+    "frame": 299,
+    "time": 8.979917,
+    "margin": 2.565123,
+    "before": 17.917,
+    "after": 20.916
+  },
+  {
+    "video": "录屏15",
+    "frame": 319,
+    "time": 9.58058,
+    "margin": 3.015665,
+    "before": 14.916,
+    "after": 19.979
+  },
+  {
+    "video": "录屏15",
+    "frame": 335,
+    "time": 10.061111,
+    "margin": 3.283528,
+    "before": 22.272,
+    "after": 19.728
+  },
+  {
+    "video": "录屏16",
+    "frame": 291,
+    "time": 8.746178,
+    "margin": 2.677506,
+    "before": 70.314,
+    "after": 41.508
+  },
+  {
+    "video": "录屏16",
+    "frame": 455,
+    "time": 13.675295,
+    "margin": 2.112788,
+    "before": 27.21,
+    "after": 21.27
+  },
+  {
+    "video": "录屏19",
+    "frame": 140,
+    "time": 4.20052,
+    "margin": 2.574324,
+    "before": 468.888,
+    "after": 44.052
+  },
+  {
+    "video": "录屏19",
+    "frame": 365,
+    "time": 10.951357,
+    "margin": 2.443793,
+    "before": 241.193,
+    "after": 20.808
+  },
+  {
+    "video": "录屏1",
+    "frame": 239,
+    "time": 7.183293,
+    "margin": 3.098897,
+    "before": 22.315,
+    "after": 17.007
+  },
+  {
+    "video": "录屏20",
+    "frame": 49,
+    "time": 1.477026,
+    "margin": 2.891057,
+    "before": 68.257,
+    "after": 27.747
+  },
+  {
+    "video": "录屏20",
+    "frame": 64,
+    "time": 1.929177,
+    "margin": 2.326182,
+    "before": 39.885,
+    "after": 18.879
+  },
+  {
+    "video": "录屏20",
+    "frame": 174,
+    "time": 5.244949,
+    "margin": 2.650717,
+    "before": 247.738,
+    "after": 15.6
+  },
+  {
+    "video": "录屏2",
+    "frame": 304,
+    "time": 9.129944,
+    "margin": 2.189135,
+    "before": 53.24,
+    "after": 10.384
+  },
+  {
+    "video": "录屏2",
+    "frame": 397,
+    "time": 11.922986,
+    "margin": 2.164633,
+    "before": 19.159,
+    "after": 35.794
+  },
+  {
+    "video": "录屏2",
+    "frame": 470,
+    "time": 14.115374,
+    "margin": 2.419672,
+    "before": 7.754,
+    "after": 5.308
+  },
+  {
+    "video": "录屏3",
+    "frame": 205,
+    "time": 6.157588,
+    "margin": 2.636019,
+    "before": 33.302,
+    "after": 4.45
+  },
+  {
+    "video": "录屏3",
+    "frame": 246,
+    "time": 7.389105,
+    "margin": 3.998595,
+    "before": 295.705,
+    "after": 5.568
+  },
+  {
+    "video": "录屏3",
+    "frame": 272,
+    "time": 8.170067,
+    "margin": 2.513173,
+    "before": 11.134,
+    "after": 19.4
+  },
+  {
+    "video": "录屏3",
+    "frame": 394,
+    "time": 11.834583,
+    "margin": 2.719932,
+    "before": 30.761,
+    "after": 22.561
+  },
+  {
+    "video": "录屏3",
+    "frame": 418,
+    "time": 12.555471,
+    "margin": 2.504981,
+    "before": 34.998,
+    "after": 28.059
+  },
+  {
+    "video": "录屏3",
+    "frame": 472,
+    "time": 14.17747,
+    "margin": 2.966478,
+    "before": 4.097,
+    "after": 14.715
+  },
+  {
+    "video": "录屏3",
+    "frame": 491,
+    "time": 14.748173,
+    "margin": 3.228966,
+    "before": 557.909,
+    "after": 13.846
+  },
+  {
+    "video": "录屏4",
+    "frame": 193,
+    "time": 5.781324,
+    "margin": 3.885199,
+    "before": 10.813,
+    "after": 17.414
+  },
+  {
+    "video": "录屏6",
+    "frame": 174,
+    "time": 5.220562,
+    "margin": 2.538102,
+    "before": 500.971,
+    "after": 41.794
+  },
+  {
+    "video": "录屏6",
+    "frame": 285,
+    "time": 8.55092,
+    "margin": 2.760528,
+    "before": 20.014,
+    "after": 2.494
+  },
+  {
+    "video": "录屏6",
+    "frame": 333,
+    "time": 9.991075,
+    "margin": 2.342836,
+    "before": 43.482,
+    "after": 15.147
+  },
+  {
+    "video": "录屏6",
+    "frame": 344,
+    "time": 10.32111,
+    "margin": 2.402315,
+    "before": 16.619,
+    "after": 17.443
+  },
+  {
+    "video": "录屏8",
+    "frame": 236,
+    "time": 7.111254,
+    "margin": 3.093822,
+    "before": 21.86,
+    "after": 16.901
+  },
+  {
+    "video": "录屏8",
+    "frame": 250,
+    "time": 7.533108,
+    "margin": 2.591779,
+    "before": 44.13,
+    "after": 165.608
+  },
+  {
+    "video": "录屏8",
+    "frame": 261,
+    "time": 7.864564,
+    "margin": 2.681837,
+    "before": 182.846,
+    "after": 67.597
+  },
+  {
+    "video": "录屏9",
+    "frame": 102,
+    "time": 3.059229,
+    "margin": 2.131643,
+    "before": 50.704,
+    "after": 11.944
+  },
+  {
+    "video": "录屏9",
+    "frame": 125,
+    "time": 3.749056,
+    "margin": 2.024116,
+    "before": 114.85,
+    "after": 9.276
+  },
+  {
+    "video": "录屏9",
+    "frame": 159,
+    "time": 4.768799,
+    "margin": 2.703335,
+    "before": 114.558,
+    "after": 18.019
+  },
+  {
+    "video": "录屏9",
+    "frame": 172,
+    "time": 5.158701,
+    "margin": 3.252568,
+    "before": 21.049,
+    "after": 33.463
+  },
+  {
+    "video": "录屏9",
+    "frame": 183,
+    "time": 5.488617,
+    "margin": 4.014287,
+    "before": 60.115,
+    "after": 19.798
+  },
+  {
+    "video": "录屏9",
+    "frame": 208,
+    "time": 6.238429,
+    "margin": 2.197589,
+    "before": 469.887,
+    "after": 35.747
+  }
+]

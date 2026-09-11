@@ -314,6 +314,15 @@ class LieDetectorRuntime:
                 multi_hypothesis_identity=bool(
                     self.config.get("multi_hypothesis_identity", True)
                 ),
+                stale_coast_recovery=bool(
+                    self.config.get("stale_coast_recovery", True)
+                ),
+                identity_ranker_model=(
+                    self.config.get("identity_ranker_model") or None
+                ),
+                identity_ranker_min_margin=float(
+                    self.config.get("identity_ranker_min_margin", 2.00)
+                ),
             )
         return self._tracker
 

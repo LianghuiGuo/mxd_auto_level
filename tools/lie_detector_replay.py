@@ -112,7 +112,12 @@ def draw_result(frame: np.ndarray, result, ground_truth, error) -> np.ndarray:
                 color,
                 2 if is_real else 1,
             )
-            label = "REAL" if is_real else f"BG:{view.track_id}"
+            role_label = "REAL" if is_real else f"BG:{view.track_id}"
+            label = (
+                f"{role_label} rk={view.ranker_score:.2f}"
+                if getattr(result, "ranker_margin", 0.0) > 0.0
+                else role_label
+            )
             cv2.putText(
                 debug,
                 label,
@@ -202,7 +207,13 @@ def draw_result(frame: np.ndarray, result, ground_truth, error) -> np.ndarray:
             f"vis={target_view.visible_streak}"
         )
     )
-    cv2.rectangle(debug, (0, 0), (min(debug.shape[1], 760), 54), (0, 0, 0), -1)
+    ranker_candidate = getattr(result, "ranker_candidate_id", None)
+    ranker_label = (
+        f"ranker candidate={ranker_candidate if ranker_candidate is not None else '--'} "
+        f"margin={getattr(result, 'ranker_margin', 0.0):.2f} "
+        f"switched={int(getattr(result, 'ranker_switched', False))}"
+    )
+    cv2.rectangle(debug, (0, 0), (min(debug.shape[1], 760), 76), (0, 0, 0), -1)
     cv2.putText(debug, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
     cv2.putText(
         debug,
@@ -211,6 +222,16 @@ def draw_result(frame: np.ndarray, result, ground_truth, error) -> np.ndarray:
         cv2.FONT_HERSHEY_SIMPLEX,
         0.48,
         (220, 220, 220),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        debug,
+        ranker_label,
+        (8, 69),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (80, 220, 255),
         1,
         cv2.LINE_AA,
     )
@@ -309,6 +330,28 @@ def main() -> int:
         action="store_true",
         help="select REAL from a beam of continuous identity paths",
     )
+    parser.add_argument(
+        "--background-certificates",
+        action="store_true",
+        help="carry unambiguous white-phase BG identities frame to frame",
+    )
+    parser.add_argument(
+        "--stale-coast-recovery",
+        action="store_true",
+        help="reacquire a mature nearby candidate after extended REAL coast",
+    )
+    parser.add_argument(
+        "--identity-ranker-model",
+        type=Path,
+        default=None,
+        help="LightGBM text ranker used as a guarded fifth identity cue",
+    )
+    parser.add_argument(
+        "--identity-ranker-min-margin",
+        type=float,
+        default=2.00,
+        help="minimum top1-top2 ranker score gap before votes accumulate",
+    )
     parser.add_argument("--yolo-conf", type=float, default=DEFAULT_CONFIDENCE)
     parser.add_argument("--yolo-imgsz", type=int, default=DEFAULT_IMAGE_SIZE)
     parser.add_argument("--yolo-stride", type=int, default=1)
@@ -353,6 +396,14 @@ def main() -> int:
         shadow_switch=args.shadow_switch,
         provisional_reassociation=args.provisional_reassociation,
         multi_hypothesis_identity=args.multi_hypothesis_identity,
+        background_certificates=args.background_certificates,
+        stale_coast_recovery=args.stale_coast_recovery,
+        identity_ranker_model=(
+            str(args.identity_ranker_model)
+            if args.identity_ranker_model is not None
+            else None
+        ),
+        identity_ranker_min_margin=args.identity_ranker_min_margin,
     )
     rows: list[dict[str, object]] = []
     errors: list[float] = []
@@ -370,6 +421,7 @@ def main() -> int:
     saw_white = False
     white_faded = False
     identity_switches = 0
+    ranker_switches = 0
 
     writer = None
     if not args.no_video:
@@ -417,6 +469,11 @@ def main() -> int:
             and getattr(result, "identity_switched", False)
         ):
             identity_switches += 1
+        if (
+            phase is EvaluationPhase.ACTIVE
+            and getattr(result, "ranker_switched", False)
+        ):
+            ranker_switches += 1
         if in_eval_window:
             evaluated_frames += 1
             if result.acquired:
@@ -462,6 +519,18 @@ def main() -> int:
                 "detection_count": len(result.detections),
                 "track_count": len(result.tracks),
                 "hypothesis_count": result.hypothesis_count,
+                "bg_registry_state": result.bg_registry_state,
+                "bg_certified_count": result.bg_certified_count,
+                "stale_recovery_committed": int(
+                    result.stale_recovery_committed
+                ),
+                "ranker_candidate_id": (
+                    ""
+                    if result.ranker_candidate_id is None
+                    else result.ranker_candidate_id
+                ),
+                "ranker_margin": f"{result.ranker_margin:.6f}",
+                "ranker_switched": int(result.ranker_switched),
                 "recovery_active": int(result.recovery_active),
                 "collective_promoted": int(result.collective_promoted),
                 "collective_dx": f"{result.collective_delta[0]:.4f}",
@@ -539,6 +608,7 @@ def main() -> int:
             else float(np.mean(np.asarray(postfade_errors) <= 40.0))
         ),
         "identity_switches": identity_switches,
+        "ranker_switches": ranker_switches,
         "inside_radius_px": args.inside_radius,
         "mean_processing_ms": None if not processing_ms else float(np.mean(processing_ms)),
         "p95_processing_ms": percentile(processing_ms, 95),

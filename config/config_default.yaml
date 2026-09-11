@@ -435,6 +435,12 @@ lie_detector:
   device: ""
   # Validate distant REAL switches against accumulated continuous paths.
   multi_hypothesis_identity: true
+  # Reacquire a mature, appearance-consistent candidate after extended coast.
+  stale_coast_recovery: true
+  # Trajectory-level REAL ranker (LightGBM text model). Empty disables it; the
+  # ranker only proposes a switch after several consecutive high-margin votes.
+  identity_ranker_model: "models/lie_identity_ranker.txt"
+  identity_ranker_min_margin: 2.00
   # Panel presence is proven by matching the 谎言探测仪 title text; the ROI
   # estimator alone also fires on ordinary gameplay frames.
   title_template: "misc/lie_detector_title_cn.png"

@@ -51,6 +51,13 @@ ml/lie_real_reviewed/images/
 ml/lie_manual_dataset/images/
 ml/videos/
 
+# Generated lie-identity listwise datasets (large and reproducible).
+ml/lie_identity_dataset/
+
+# Motion-ablation feature caches. Keep reports and small experimental models.
+ml/lie_motion_ablation/*_augmented.csv
+ml/lie_motion_ablation/online_smoke/
+
 # Ultralytics caches and default run dirs (weights/plots; regenerable).
 *.cache
 runs/
@@ -62,3 +69,11 @@ log/lie_vis_*/
 log/lie_error_analysis/
 log/lie_manual_model_smoke/
 log/lie_replay_*.csv
+
+# Per-frame A/B replay artifacts. Keep the run reports and summary JSON files.
+log/lie_ranker_ab_*/baseline/
+log/lie_ranker_ab_*/ranker/
+log/lie_ranker_ab_*/ranker_margin_*/
+log/lie_ranker_ab_*/ranker_final/
+log/lie_motion_ablation_*/margin_*/
+log/lie_motion_ablation_*/final_visualizations/
