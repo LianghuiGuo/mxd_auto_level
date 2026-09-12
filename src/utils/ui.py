@@ -171,20 +171,41 @@ def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None
     if comments_section and title in comments_section:
         gbox.setToolTip(comments_section[title])
 
-    def get_comment(key):
+    def get_comment(path):
+        # Nested blocks inherit the comment attached to their parent YAML key.
+        key = path[0]
         if comments and title in comments and key in comments[title]:
             return comments[title][key]
         return ""
 
-    def add_field(key, value):
-        tooltip = get_comment(key)
+    def set_value(path, value):
+        target = cfg[title]
+        for part in path[:-1]:
+            target = target[part]
+        target[path[-1]] = value
+
+    def add_field(path, value):
+        key = ".".join(path)
+        tooltip = get_comment(path)
+
+        if isinstance(value, dict):
+            # Route colour maps and similar arbitrary key/value dictionaries
+            # were intentionally hidden by the old UI.  Recurse only into
+            # settings-shaped blocks (for example lie_detector.alert), whose
+            # keys are regular identifiers, so existing screens do not expand
+            # into dozens of editable implementation mappings.
+            if not all(str(child_key).isidentifier() for child_key in value):
+                return
+            for child_key, child_value in value.items():
+                add_field((*path, child_key), child_value)
+            return
 
         if isinstance(value, bool):
             checkbox = QCheckBox()
             checkbox.setChecked(value)
             checkbox.setToolTip(tooltip)
             def update_checkbox(state):
-                cfg[title][key] = Qt.CheckState(state) == Qt.Checked
+                set_value(path, Qt.CheckState(state) == Qt.Checked)
             checkbox.stateChanged.connect(update_checkbox)
             form_layout.addRow(QLabel(key), checkbox)
             gbox._field_refs[key] = checkbox
@@ -201,10 +222,10 @@ def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None
                 hbox.addWidget(line)
 
             def update_list():
-                cfg[title][key] = [
+                set_value(path, [
                     float(e.text()) if isinstance(v, float) else int(e.text())
                     for e, v in zip(edits, value) if e.text() != ''
-                ]
+                ])
 
             for edit in edits:
                 edit.textChanged.connect(update_list)
@@ -219,7 +240,10 @@ def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None
             line.setToolTip(tooltip)
             def update_value(val):
                 if val != '':
-                    cfg[title][key] = float(val) if isinstance(value, float) else int(val)
+                    set_value(
+                        path,
+                        float(val) if isinstance(value, float) else int(val),
+                    )
             line.textChanged.connect(update_value)
             form_layout.addRow(QLabel(key), line)
             gbox._field_refs[key] = line
@@ -237,18 +261,48 @@ def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None
                     combo.setCurrentText(value)
                 combo.setToolTip(tooltip)
 
-                combo.currentTextChanged.connect(lambda val: cfg[title].__setitem__(key, val))
+                combo.currentTextChanged.connect(lambda val: set_value(path, val))
                 form_layout.addRow(QLabel(key), combo)
                 gbox._field_refs[key] = combo
             else:
                 line = QLineEdit(value)
                 line.setToolTip(tooltip)
-                line.textChanged.connect(lambda val: cfg[title].__setitem__(key, val))
+                line.textChanged.connect(lambda val: set_value(path, val))
                 form_layout.addRow(QLabel(key), line)
                 gbox._field_refs[key] = line
 
     for key, value in cfg[title].items():
-        add_field(key, value)
+        add_field((key,), value)
 
     gbox.setLayout(form_layout)
     return gbox
+
+
+def update_advance_setting_gbox(gbox, values):
+    """Refresh scalar widgets, including nested dictionary fields."""
+    refs = getattr(gbox, "_field_refs", {})
+
+    def update(path, value):
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                update((*path, child_key), child_value)
+            return
+        widget = refs.get(".".join(path))
+        if widget is None:
+            return
+        if isinstance(value, bool) and isinstance(widget, QCheckBox):
+            widget.setChecked(value)
+        elif isinstance(value, (list, tuple)) and isinstance(widget, list):
+            for line, item in zip(widget, value):
+                line.setText(str(item))
+        elif isinstance(value, (int, float)) and isinstance(widget, QLineEdit):
+            widget.setText(str(value))
+        elif isinstance(value, str) and isinstance(widget, QComboBox):
+            index = widget.findText(value)
+            if index != -1:
+                widget.setCurrentIndex(index)
+        elif isinstance(value, str) and isinstance(widget, QLineEdit):
+            widget.setText(value)
+
+    for key, value in values.items():
+        update((key,), value)

@@ -23,7 +23,7 @@ from src.utils.logger import logger
 from src.utils.ui import (
     validate_numerical_input, clear_debug_canvas,
     create_error_label, SingleKeyEdit, QtLogHandler, create_advance_setting_gbox,
-    safe_int, safe_float,
+    update_advance_setting_gbox, safe_int, safe_float,
 )
 from src.utils.common import (
     load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff, load_yaml_with_comments
@@ -1008,34 +1008,9 @@ class MainWindow(QMainWindow):
         for title in self.cfg:
             if title in ADV_SETTINGS_HIDE: # skip hide settings
                 continue
-            refs = getattr(self.advance_settings_gboxes[title], "_field_refs", {})
-            for key, value in self.cfg[title].items():
-                widget = refs.get(key)
-                if widget is None:
-                    continue  # unknown field, skip
-
-                # Checkbox
-                if isinstance(value, bool) and isinstance(widget, QCheckBox):
-                    widget.setChecked(value)
-
-                # List of QLineEdits
-                elif isinstance(value, (list, tuple)) and isinstance(widget, list):
-                    for line, v in zip(widget, value):
-                        line.setText(str(v))
-
-                # Single numeric value
-                elif isinstance(value, (int, float)) and isinstance(widget, QLineEdit):
-                    widget.setText(str(value))
-
-                # Droplist
-                elif isinstance(value, str) and isinstance(widget, QComboBox):
-                    index = widget.findText(value)
-                    if index != -1:
-                        widget.setCurrentIndex(index)
-
-                # String
-                elif isinstance(value, str) and isinstance(widget, QLineEdit):
-                    widget.setText(value)
+            gbox = self.advance_settings_gboxes.get(title)
+            if gbox is not None and isinstance(self.cfg[title], dict):
+                update_advance_setting_gbox(gbox, self.cfg[title])
 
     def add_buff_row(self, key="", cooldown=""):
         row_widget = QWidget()
