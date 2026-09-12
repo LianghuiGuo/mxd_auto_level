@@ -65,6 +65,13 @@ MULTILAG_FEATURE_NAMES = (
     "multilag_spin_consistency",
 )
 
+SWITCH_MOTION_FEATURE_NAMES = (
+    *FLOW_FEATURE_NAMES,
+    *MULTILAG_FEATURE_NAMES,
+    "spin_estimator_agreement",
+    "spin_joint_confidence",
+)
+
 MOTION_FEATURE_NAMES = (
     *SIMILARITY_FEATURE_NAMES,
     *FLOW_FEATURE_NAMES,
@@ -407,6 +414,141 @@ def multilag_rotation_features(
     )
     confidence = float(np.mean(weights)) * sign_consistency
     return min(3.0, abs(signed) / 22.0), confidence, sign_consistency
+
+
+class SwitchMotionFeatureHistory:
+    """Compute expensive image motion only for switch-event participants.
+
+    Frames and visible track centres are kept aligned so a temporary missed
+    detection cannot accidentally pair an old position with a newer image.
+    The source frames have already had the green cursor removed by the tracker.
+    """
+
+    def __init__(self, *, history_size: int = 5):
+        self.history_size = max(5, int(history_size))
+        self.reset()
+
+    def reset(self) -> None:
+        self.frames: deque[np.ndarray] = deque(maxlen=self.history_size)
+        self.tracks: deque[dict[int, tuple[tuple[float, float], float]]] = deque(
+            maxlen=self.history_size
+        )
+
+    def update(
+        self,
+        views: Sequence[Any],
+        *,
+        gray_frame: np.ndarray | None,
+    ) -> None:
+        if gray_frame is None:
+            return
+        visible = {
+            int(view.track_id): (
+                (float(view.center[0]), float(view.center[1])),
+                float(view.radius),
+            )
+            for view in views
+            if view.lost_frames == 0 and not view.predicted_only
+        }
+        self.frames.append(gray_frame.copy())
+        self.tracks.append(visible)
+
+    @staticmethod
+    def _empty() -> dict[str, float]:
+        return {name: 0.0 for name in SWITCH_MOTION_FEATURE_NAMES}
+
+    def features(
+        self,
+        track_ids: Iterable[int],
+        *,
+        include_optical: bool = True,
+        include_multilag: bool = True,
+    ) -> dict[int, dict[str, float]]:
+        output = {int(track_id): self._empty() for track_id in track_ids}
+        if not self.frames or not self.tracks:
+            return output
+        current_tracks = self.tracks[-1]
+        for track_id in output:
+            current = current_tracks.get(track_id)
+            if current is None:
+                continue
+            current_center, current_radius = current
+            flow = (0.0, 0.0, 0.0)
+            if include_optical and len(self.frames) >= 2:
+                previous = self.tracks[-2].get(track_id)
+                if previous is not None:
+                    flow = optical_spin_features(
+                        self.frames[-2],
+                        self.frames[-1],
+                        previous[0],
+                        current_center,
+                        0.5 * (previous[1] + current_radius),
+                    )
+
+            measurements: list[tuple[float, float]] = []
+            current_descriptor = (
+                _polar_descriptor(self.frames[-1], current_center, current_radius)
+                if include_multilag
+                else None
+            )
+            if current_descriptor is not None:
+                for lag in (1, 2, 4):
+                    if len(self.frames) <= lag:
+                        continue
+                    previous = self.tracks[-lag - 1].get(track_id)
+                    if previous is None:
+                        continue
+                    previous_descriptor = _polar_descriptor(
+                        self.frames[-lag - 1], previous[0], previous[1]
+                    )
+                    if previous_descriptor is None:
+                        continue
+                    delta, confidence = _match_multilag(
+                        previous_descriptor,
+                        current_descriptor,
+                        max_degrees=min(88.0, 22.0 * lag),
+                    )
+                    if delta is not None:
+                        measurements.append((float(delta) / lag, confidence))
+            if measurements:
+                values = np.asarray(
+                    [item[0] for item in measurements], dtype=np.float64
+                )
+                weights = np.asarray(
+                    [item[1] for item in measurements], dtype=np.float64
+                )
+                signed = float(
+                    np.average(values, weights=np.maximum(weights, 1e-6))
+                )
+                sign_consistency = abs(
+                    float(np.sum(weights * np.sign(values)))
+                ) / max(float(np.sum(weights)), 1e-6)
+                multilag = (
+                    min(3.0, abs(signed) / 22.0),
+                    float(np.mean(weights)) * sign_consistency,
+                    sign_consistency,
+                )
+            else:
+                multilag = (0.0, 0.0, 0.0)
+
+            optical_confidence = float(flow[1])
+            multilag_confidence = float(multilag[1])
+            both_observed = optical_confidence > 0.0 and multilag_confidence > 0.0
+            agreement = (
+                max(0.0, 1.0 - abs(float(flow[0]) - float(multilag[0])) / 3.0)
+                if both_observed
+                else 0.0
+            )
+            joint_confidence = (
+                math.sqrt(optical_confidence * multilag_confidence)
+                if both_observed
+                else 0.0
+            )
+            output[track_id].update(dict(zip(FLOW_FEATURE_NAMES, flow)))
+            output[track_id].update(dict(zip(MULTILAG_FEATURE_NAMES, multilag)))
+            output[track_id]["spin_estimator_agreement"] = float(agreement)
+            output[track_id]["spin_joint_confidence"] = float(joint_confidence)
+        return output
 
 
 def extract_frame_features(

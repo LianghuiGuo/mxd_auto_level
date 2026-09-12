@@ -5,6 +5,10 @@ import cv2
 import numpy as np
 
 from src.engine.LieDetectorTracker import LieDetectorTracker, ShapeDetection
+from src.engine.LiePreAssociationFlow import (
+    FlowTrackObservation,
+    PreAssociationFlow,
+)
 
 
 class LieDetectorTrackerTest(unittest.TestCase):
@@ -77,6 +81,131 @@ class LieDetectorTrackerTest(unittest.TestCase):
             self.assertIsNotNone(result.center)
             errors.append(np.linalg.norm(np.subtract(result.center, target)))
         self.assertLess(float(np.percentile(errors, 95)), 25.0)
+
+    @staticmethod
+    def _flow_frame(centers, *, offset=(0.0, 0.0), outlier=None):
+        image = np.zeros((280, 440), dtype=np.uint8)
+        for index, center in enumerate(centers, start=1):
+            dx, dy = offset
+            if outlier is not None and index == outlier[0]:
+                dx, dy = outlier[1]
+            cx = int(round(center[0] + dx))
+            cy = int(round(center[1] + dy))
+            cv2.rectangle(image, (cx - 22, cy - 18), (cx + 22, cy + 18), 150, 2)
+            cv2.line(image, (cx - 18, cy), (cx + 18, cy), 230, 2)
+            cv2.line(image, (cx, cy - 15), (cx, cy + 15), 200, 2)
+            cv2.circle(image, (cx + 11, cy - 8), 3, 255, -1)
+        return image
+
+    def test_preassociation_flow_tracks_translation_and_group_outlier(self):
+        centers = [(80.0, 80.0), (180.0, 80.0), (80.0, 180.0), (180.0, 180.0)]
+        tracker = LieDetectorTracker()
+        for center in centers:
+            tracker._spawn(
+                ShapeDetection(center, 34.0, (0, 0, 68, 68)), 0.0
+            )
+        observer = PreAssociationFlow()
+        observer.commit(self._flow_frame(centers), tracker.tracks.values())
+        observations = observer.observe(
+            self._flow_frame(
+                centers, offset=(5.0, 3.0), outlier=(4, (19.0, 3.0))
+            )
+        )
+
+        self.assertEqual(set(observations), {1, 2, 3, 4})
+        for track_id in (1, 2, 3):
+            self.assertLess(
+                np.linalg.norm(
+                    np.subtract(observations[track_id].predicted_center,
+                                (centers[track_id - 1][0] + 5.0, centers[track_id - 1][1] + 3.0))
+                ),
+                1.5,
+            )
+        self.assertGreater(observations[4].group_residual, 8.0)
+        self.assertLess(
+            float(np.median([observations[item].group_residual for item in (1, 2, 3)])),
+            2.0,
+        )
+
+    def test_flow_association_can_resolve_crossing_predictions(self):
+        tracker = LieDetectorTracker(flow_association=True)
+        first = tracker._spawn(
+            ShapeDetection((100.0, 100.0), 30.0, (0, 0, 60, 60)), 0.0
+        )
+        second = tracker._spawn(
+            ShapeDetection((140.0, 100.0), 30.0, (0, 0, 60, 60)), 0.0
+        )
+        first.kf.statePost[2, 0] = 600.0
+        second.kf.statePost[2, 0] = -600.0
+        first.lost_frames = 1
+        second.lost_frames = 1
+        flow = {
+            first.id: FlowTrackObservation(
+                first.id, (100.0, 100.0), (108.0, 100.0), (8.0, 0.0),
+                0.95, 0.1, 0.9, 0.8, 12,
+            ),
+            second.id: FlowTrackObservation(
+                second.id, (140.0, 100.0), (132.0, 100.0), (-8.0, 0.0),
+                0.95, 0.1, 0.9, 0.8, 12,
+            ),
+        }
+        tracker._associate(
+            [
+                ShapeDetection((108.0, 100.0), 30.0, (0, 0, 60, 60)),
+                ShapeDetection((132.0, 100.0), 30.0, (0, 0, 60, 60)),
+            ],
+            1.0 / 30.0,
+            flow,
+        )
+
+        self.assertAlmostEqual(first.last_detection.center[0], 108.0)
+        self.assertAlmostEqual(second.last_detection.center[0], 132.0)
+        self.assertTrue(first.flow_association_used)
+        self.assertTrue(second.flow_association_used)
+
+    def test_flow_association_does_not_perturb_unambiguous_match(self):
+        tracker = LieDetectorTracker(flow_association=True)
+        track = tracker._spawn(
+            ShapeDetection((100.0, 100.0), 30.0, (0, 0, 60, 60)), 0.0
+        )
+        misleading = FlowTrackObservation(
+            track.id, (100.0, 100.0), (125.0, 100.0), (25.0, 0.0),
+            0.95, 0.10, 0.95, 0.85, 16,
+        )
+        tracker._associate(
+            [
+                ShapeDetection((103.0, 100.0), 30.0, (0, 0, 60, 60)),
+                ShapeDetection((130.0, 100.0), 30.0, (0, 0, 60, 60)),
+            ],
+            1.0 / 30.0,
+            {track.id: misleading},
+        )
+
+        self.assertAlmostEqual(track.last_detection.center[0], 103.0)
+        self.assertFalse(track.flow_association_used)
+
+    def test_flow_coast_requires_strict_confidence(self):
+        tracker = LieDetectorTracker(flow_coast=True)
+        track = tracker._spawn(
+            ShapeDetection((100.0, 100.0), 30.0, (0, 0, 60, 60)), 0.0
+        )
+        tracker.target_id = track.id
+        observation = FlowTrackObservation(
+            track.id, (100.0, 100.0), (106.0, 102.0), (6.0, 2.0),
+            0.80, 0.20, 0.90, 0.80, 14, local_fit_error=0.30,
+        )
+        tracker._associate([], 1.0 / 30.0, {track.id: observation})
+        self.assertTrue(track.predicted_only)
+        self.assertTrue(track.flow_coasted)
+        self.assertEqual(track.lost_frames, 1)
+        self.assertLess(np.linalg.norm(np.subtract(track.state[:2], (106.0, 102.0))), 5.0)
+
+        weak = FlowTrackObservation(
+            track.id, (106.0, 102.0), (112.0, 104.0), (6.0, 2.0),
+            0.20, 0.20, 0.90, 0.80, 14, local_fit_error=0.30,
+        )
+        tracker._associate([], 2.0 / 30.0, {track.id: weak})
+        self.assertFalse(track.flow_coasted)
 
     def test_classifies_star_as_contour_target(self):
         image = np.full((360, 520, 3), (120, 165, 190), dtype=np.uint8)
@@ -455,6 +584,30 @@ class LieDetectorTrackerTest(unittest.TestCase):
         self.assertGreater(coherent, 10.0)
         self.assertLess(oscillating, coherent * 0.2)
         self.assertEqual(unreliable, 0.0)
+
+    def test_track_rotation_residual_is_computed_after_association(self):
+        tracker = LieDetectorTracker()
+        for center in ((100.0, 100.0), (200.0, 100.0), (300.0, 100.0)):
+            tracker._spawn(
+                ShapeDetection(center, 40.0, (0, 0, 80, 80)),
+                0.0,
+            )
+        deltas = (math.radians(14.0), math.radians(1.0), math.radians(2.0))
+        for track, delta in zip(tracker.tracks.values(), deltas):
+            track.last_rotation_delta = delta
+            track.rotation_confidence = 0.9
+            track.rotation_valid = True
+
+        tracker._annotate_track_rotation_residuals()
+
+        self.assertGreater(tracker.tracks[1].peer_rotation_residual, 11.0)
+        self.assertLess(tracker.tracks[2].peer_rotation_residual, 2.0)
+        self.assertLess(tracker.tracks[3].peer_rotation_residual, 2.0)
+        # The legacy four-cue field remains untouched until the new residual
+        # has passed the learned switch-event gate.
+        self.assertEqual(
+            tracker.tracks[1].last_detection.collective_rotation_residual, 0.0
+        )
 
     def test_challenger_needs_repeated_evidence_to_flip_real(self):
         tracker = LieDetectorTracker()

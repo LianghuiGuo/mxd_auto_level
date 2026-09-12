@@ -23,8 +23,16 @@ import cv2
 import numpy as np
 
 from src.engine.LieBackgroundCertificates import LieBackgroundCertificates
-from src.engine.LieIdentityRanker import TrajectoryIdentityRanker
+from src.engine.LieIdentityRanker import (
+    SWITCH_MOTION_FEATURE_NAMES,
+    SwitchMotionFeatureHistory,
+    TrajectoryIdentityRanker,
+)
 from src.engine.LieSwitchEventModel import SwitchEventModel
+from src.engine.LiePreAssociationFlow import (
+    FlowTrackObservation,
+    PreAssociationFlow,
+)
 
 try:
     from scipy.optimize import linear_sum_assignment
@@ -95,6 +103,14 @@ _STATE_AWARE_RECOVERY_COAST = 14
 _SWITCH_EVENT_VISIBLE_MIN_DELTA = 0.50
 _SWITCH_EVENT_ROLLBACK_WINDOW = 12
 _SWITCH_EVENT_ROLLBACK_EVIDENCE = 1.20
+_FLOW_ASSOCIATION_MIN_CONFIDENCE = 0.28
+_FLOW_ASSOCIATION_MAX_WEIGHT = 0.35
+_FLOW_COAST_MIN_CONFIDENCE = 0.42
+_FLOW_COAST_MAX_FB_ERROR = 0.80
+_FLOW_COAST_MIN_INLIER_RATIO = 0.65
+_FLOW_COAST_MIN_COVERAGE = 0.35
+_FLOW_COAST_MAX_FIT_ERROR = 1.50
+_FLOW_COAST_MAX_KALMAN_DISAGREEMENT = 14.0
 TrackRole = Literal["real", "bg", "unknown"]
 
 
@@ -157,6 +173,15 @@ class ConstellationTrackView:
     predicted_only: bool = False
     bg_certified: bool = False
     ranker_score: float = 0.0
+    flow_confidence: float = 0.0
+    flow_forward_backward_error: float = 0.0
+    flow_inlier_ratio: float = 0.0
+    flow_coverage: float = 0.0
+    flow_local_fit_error: float = 0.0
+    flow_group_residual: float = 0.0
+    flow_group_confidence: float = 0.0
+    flow_association_used: bool = False
+    flow_coasted: bool = False
 
 
 @dataclass
@@ -203,6 +228,9 @@ class LieDetectorTrackingResult:
     switch_event: Optional[dict[str, object]] = None
     switch_event_probability: float = 0.0
     switch_event_approved: bool = False
+    flow_observation_count: int = 0
+    flow_association_count: int = 0
+    flow_coast_count: int = 0
     constellation: list[ConstellationTrackView] = field(default_factory=list)
 
 
@@ -291,6 +319,9 @@ class _ShapeTrack:
         self.rotation_delta_history: list[float] = []
         self.rotation_dt_history: list[float] = []
         self.angular_velocity = 0.0
+        self.last_rotation_delta = 0.0
+        self.rotation_confidence = 0.0
+        self.rotation_valid = False
         self.appearance = (
             None
             if detection.appearance is None
@@ -298,6 +329,7 @@ class _ShapeTrack:
         )
         self.translation_residual = 0.0
         self.rotation_residual = 0.0
+        self.peer_rotation_residual = 0.0
         self.real_score = 0.0
         self.prev_center: Optional[tuple[float, float]] = None
         self.velocity: tuple[float, float] = (0.0, 0.0)
@@ -310,6 +342,16 @@ class _ShapeTrack:
         self.rigidity_score = 0.0
         self.appearance_score = 0.0
         self.ranker_score = 0.0
+        self.flow_predicted_center: Optional[tuple[float, float]] = None
+        self.flow_confidence = 0.0
+        self.flow_forward_backward_error = 0.0
+        self.flow_inlier_ratio = 0.0
+        self.flow_coverage = 0.0
+        self.flow_local_fit_error = 0.0
+        self.flow_group_residual = 0.0
+        self.flow_group_confidence = 0.0
+        self.flow_association_used = False
+        self.flow_coasted = False
 
     def _set_transition(self, dt: float) -> None:
         dt = float(np.clip(dt, 1.0 / 120.0, 0.25))
@@ -338,6 +380,7 @@ class _ShapeTrack:
         timestamp: float,
         *,
         association_quality: float = 1.0,
+        flow_association_used: bool = False,
     ) -> None:
         if self.last_detection is not None:
             self.prev_center = (
@@ -361,6 +404,8 @@ class _ShapeTrack:
         self.visible_streak += 1
         self.lost_frames = 0
         self.predicted_only = False
+        self.flow_coasted = False
+        self.flow_association_used = bool(flow_association_used)
         self.association_quality_history.append(
             float(np.clip(association_quality, 0.0, 1.0))
         )
@@ -416,12 +461,22 @@ class _ShapeTrack:
             self.orientation_quality_history.append(float(rotation_quality))
             detection.orientation = float(self.orientation_phase)
             detection.orientation_confidence = float(rotation_quality)
+            self.last_rotation_delta = float(rotation_delta)
+            self.rotation_confidence = float(rotation_quality)
+            self.rotation_valid = bool(rotation_quality > 0.0)
         elif incoming_rotation is not None:
             # Preserve a failed measurement in the reliability window so that
             # intermittent texture/occlusion cannot produce a high spin score.
             self.rotation_delta_history.append(0.0)
             self.rotation_dt_history.append(float(self.last_dt))
             self.orientation_quality_history.append(0.0)
+            self.last_rotation_delta = 0.0
+            self.rotation_confidence = 0.0
+            self.rotation_valid = False
+        else:
+            self.last_rotation_delta = 0.0
+            self.rotation_confidence = 0.0
+            self.rotation_valid = False
 
         if len(self.orientation_history) > _ORIENT_HISTORY:
             self.orientation_history = self.orientation_history[-_ORIENT_HISTORY:]
@@ -440,6 +495,65 @@ class _ShapeTrack:
     def mark_missed(self) -> None:
         self.lost_frames += 1
         self.visible_streak = 0
+        self.flow_coasted = False
+        self.flow_association_used = False
+        self.last_rotation_delta = 0.0
+        self.rotation_confidence = 0.0
+        self.rotation_valid = False
+        self.peer_rotation_residual = 0.0
+
+    def set_flow_observation(
+        self, observation: Optional[FlowTrackObservation]
+    ) -> None:
+        if observation is None:
+            self.flow_predicted_center = None
+            self.flow_confidence = 0.0
+            self.flow_forward_backward_error = 0.0
+            self.flow_inlier_ratio = 0.0
+            self.flow_coverage = 0.0
+            self.flow_local_fit_error = 0.0
+            self.flow_group_residual = 0.0
+            self.flow_group_confidence = 0.0
+            self.flow_association_used = False
+            return
+        self.flow_predicted_center = observation.predicted_center
+        self.flow_confidence = float(observation.confidence)
+        self.flow_forward_backward_error = float(
+            observation.forward_backward_error
+        )
+        self.flow_inlier_ratio = float(observation.inlier_ratio)
+        self.flow_coverage = float(observation.coverage)
+        self.flow_local_fit_error = float(observation.local_fit_error)
+        self.flow_group_residual = float(observation.group_residual)
+        self.flow_group_confidence = float(observation.group_confidence)
+        self.flow_association_used = False
+
+    def apply_flow_coast(
+        self, observation: FlowTrackObservation
+    ) -> None:
+        """Correct a missed track from strict optical flow but keep it predicted."""
+        previous = np.asarray(self.state[:2], dtype=np.float64)
+        x, y = observation.predicted_center
+        # Do not call Kalman.correct(): an optical-only observation must never
+        # shrink covariance or make a detector-missed position look safer.
+        flow_state = self.kf.statePre.copy()
+        flow_state[0, 0] = float(x)
+        flow_state[1, 0] = float(y)
+        self.kf.statePre = flow_state
+        self.prev_center = (float(previous[0]), float(previous[1]))
+        self.velocity = (float(x - previous[0]), float(y - previous[1]))
+        self.motion_history.append(self.velocity)
+        if len(self.motion_history) > 7:
+            self.motion_history = self.motion_history[-7:]
+        self.lost_frames += 1
+        self.visible_streak = 0
+        self.predicted_only = True
+        self.flow_coasted = True
+        self.flow_association_used = False
+        self.last_rotation_delta = 0.0
+        self.rotation_confidence = 0.0
+        self.rotation_valid = False
+        self.peer_rotation_residual = 0.0
 
     @property
     def state(self) -> tuple[float, float, float]:
@@ -518,6 +632,10 @@ class LieDetectorTracker:
         motion_corroboration_model: Optional[str] = None,
         switch_event_model: Optional[str] = None,
         switch_event_min_probability: float = 0.5,
+        switch_motion_features: bool = False,
+        preassociation_flow: bool = False,
+        flow_association: bool = False,
+        flow_coast: bool = False,
     ) -> None:
         self.min_radius = int(min_radius)
         self.max_radius = int(max_radius)
@@ -563,6 +681,46 @@ class LieDetectorTracker:
                 switch_event_model,
                 min_probability=switch_event_min_probability,
             )
+        )
+        self.switch_optical_features_enabled = bool(
+            switch_motion_features
+            or (
+                self.switch_event_model is not None
+                and self.switch_event_model.needs_optical_features
+            )
+        )
+        self.switch_multilag_features_enabled = bool(
+            switch_motion_features
+            or (
+                self.switch_event_model is not None
+                and self.switch_event_model.needs_multilag_features
+            )
+        )
+        self.switch_motion_features_enabled = bool(
+            self.switch_optical_features_enabled
+            or self.switch_multilag_features_enabled
+        )
+        self.switch_motion_history = (
+            SwitchMotionFeatureHistory()
+            if self.switch_motion_features_enabled
+            else None
+        )
+        self.flow_association_enabled = bool(flow_association)
+        self.flow_coast_enabled = bool(flow_coast)
+        self.preassociation_flow_shadow_enabled = bool(
+            preassociation_flow
+            or (
+                self.switch_event_model is not None
+                and self.switch_event_model.needs_preflow_features
+            )
+        )
+        self.preassociation_flow_enabled = bool(
+            self.preassociation_flow_shadow_enabled
+            or self.flow_association_enabled
+            or self.flow_coast_enabled
+        )
+        self.preassociation_flow = (
+            PreAssociationFlow() if self.preassociation_flow_enabled else None
         )
         self.reset()
 
@@ -626,6 +784,9 @@ class LieDetectorTracker:
         self.switch_event: Optional[dict[str, object]] = None
         self.switch_event_probability = 0.0
         self.switch_event_approved = False
+        self.flow_observation_count = 0
+        self.flow_association_count = 0
+        self.flow_coast_count = 0
         self.recent_ranker_switch_previous_id: Optional[int] = None
         self.recent_ranker_switch_age = 0
         self.identity_confidence = 0.0
@@ -640,6 +801,10 @@ class LieDetectorTracker:
             self.identity_ranker.reset()
         if self.motion_corroboration_ranker is not None:
             self.motion_corroboration_ranker.reset()
+        if self.switch_motion_history is not None:
+            self.switch_motion_history.reset()
+        if self.preassociation_flow is not None:
+            self.preassociation_flow.reset()
         if self.candidate_detector is not None:
             self.candidate_detector.reset()
 
@@ -1143,6 +1308,47 @@ class LieDetectorTracker:
         self.previous_centers = current
         self.previous_orientations = current_orient
 
+    def _annotate_track_rotation_residuals(self) -> None:
+        """Compare associated per-track spin against the visible peer consensus.
+
+        Real image detections only obtain an orientation delta while they are
+        associated with a track.  Computing this residual before association
+        therefore silently produced zeros for the normal YOLO path.
+        """
+        visible = [
+            track
+            for track in self.tracks.values()
+            if track.lost_frames == 0
+            and not track.predicted_only
+            and track.last_detection is not None
+        ]
+        measured = [track for track in visible if track.rotation_valid]
+        consensus: Optional[float] = None
+        if len(measured) >= 3:
+            deltas = np.asarray(
+                [track.last_rotation_delta for track in measured], dtype=np.float64
+            )
+            weights = np.asarray(
+                [track.rotation_confidence for track in measured], dtype=np.float64
+            )
+            order = np.argsort(deltas)
+            ordered = deltas[order]
+            ordered_weights = weights[order]
+            midpoint = 0.5 * float(np.sum(ordered_weights))
+            index = int(
+                np.searchsorted(
+                    np.cumsum(ordered_weights), midpoint, side="left"
+                )
+            )
+            consensus = float(ordered[min(index, len(ordered) - 1)])
+        for track in visible:
+            residual = (
+                self._angle_delta_degrees(track.last_rotation_delta, consensus)
+                if track.rotation_valid and consensus is not None
+                else 0.0
+            )
+            track.peer_rotation_residual = float(residual)
+
     def _update_background_certificates(
         self,
         detections: list[ShapeDetection],
@@ -1304,7 +1510,52 @@ class LieDetectorTracker:
         self.next_track_id += 1
         return track
 
-    def _associate(self, detections: list[ShapeDetection], timestamp: float) -> bool:
+    def _flow_coast_is_safe(
+        self,
+        track: _ShapeTrack,
+        observation: Optional[FlowTrackObservation],
+        detections: list[ShapeDetection],
+    ) -> bool:
+        if (
+            not self.flow_coast_enabled
+            or track.id != self.target_id
+            or observation is None
+            or track.lost_frames >= 3
+            or observation.confidence < _FLOW_COAST_MIN_CONFIDENCE
+            or observation.forward_backward_error > _FLOW_COAST_MAX_FB_ERROR
+            or observation.inlier_ratio < _FLOW_COAST_MIN_INLIER_RATIO
+            or observation.coverage < _FLOW_COAST_MIN_COVERAGE
+            or observation.local_fit_error > _FLOW_COAST_MAX_FIT_ERROR
+            or math.hypot(
+                observation.predicted_center[0] - track.state[0],
+                observation.predicted_center[1] - track.state[1],
+            )
+            > _FLOW_COAST_MAX_KALMAN_DISAGREEMENT
+            or self._outside_frame(observation.predicted_center)
+        ):
+            return False
+        # If YOLO found a nearby centre, a duplicate flow-only track would make
+        # identity ambiguity worse.  Flow coast is reserved for genuine short
+        # detector gaps.
+        nearest = min(
+            (
+                math.hypot(
+                    detection.center[0] - observation.predicted_center[0],
+                    detection.center[1] - observation.predicted_center[1],
+                )
+                for detection in detections
+            ),
+            default=float("inf"),
+        )
+        return nearest > max(14.0, 0.55 * track.state[2])
+
+    def _associate(
+        self,
+        detections: list[ShapeDetection],
+        timestamp: float,
+        flow_observations: Optional[dict[int, FlowTrackObservation]] = None,
+    ) -> bool:
+        flow_observations = flow_observations or {}
         track_list = list(self.tracks.values())
         predictions = [track.predict(timestamp) for track in track_list]
         if not track_list:
@@ -1313,7 +1564,13 @@ class LieDetectorTracker:
             return False
         if not detections:
             for track in track_list:
-                track.mark_missed()
+                observation = flow_observations.get(track.id)
+                if self._flow_coast_is_safe(track, observation, detections):
+                    assert observation is not None
+                    track.apply_flow_coast(observation)
+                    self.flow_coast_count += 1
+                else:
+                    track.mark_missed()
             committed = self._advance_pending_reassociation()
             self._drop_stale()
             return committed
@@ -1321,6 +1578,7 @@ class LieDetectorTracker:
         large = 1e6
         cost = np.full((len(track_list), len(detections)), large, dtype=np.float32)
         match_quality = np.zeros_like(cost)
+        flow_used = np.zeros_like(cost, dtype=bool)
         reserved_col: Optional[int] = None
         reserved_position_error = float("inf")
         provisional_old: Optional[_ShapeTrack] = None
@@ -1389,6 +1647,28 @@ class LieDetectorTracker:
             ):
                 continue
             px, py, pr = prediction
+            flow = flow_observations.get(track.id)
+            flow_weight = 0.0
+            # Repeated star textures can produce confident-but-wrong LK tracks
+            # during visible crossings.  Optical flow may rescue a track only
+            # after the detector association has already missed it; it never
+            # rewrites an otherwise live association.
+            association_ambiguous = track.lost_frames > 0
+            if (
+                self.flow_association_enabled
+                and association_ambiguous
+                and flow is not None
+                and flow.confidence >= _FLOW_ASSOCIATION_MIN_CONFIDENCE
+                and math.hypot(
+                    flow.predicted_center[0] - px,
+                    flow.predicted_center[1] - py,
+                )
+                <= max(36.0, 0.90 * pr)
+            ):
+                flow_weight = min(
+                    _FLOW_ASSOCIATION_MAX_WEIGHT,
+                    0.10 + 0.30 * flow.confidence,
+                )
             gate = self.max_match_distance + min(track.lost_frames, 6) * 10.0
             if track.id == self.target_id:
                 gate += 15.0
@@ -1396,8 +1676,29 @@ class LieDetectorTracker:
                 distance = math.hypot(
                     detection.center[0] - px, detection.center[1] - py
                 )
+                flow_distance = (
+                    math.hypot(
+                        detection.center[0] - flow.predicted_center[0],
+                        detection.center[1] - flow.predicted_center[1],
+                    )
+                    if flow_weight > 0.0 and flow is not None
+                    else distance
+                )
+                association_distance = (
+                    (1.0 - flow_weight) * distance
+                    + flow_weight * flow_distance
+                )
                 radius_delta = abs(detection.radius - pr)
-                if distance <= gate and radius_delta <= max(30.0, pr * 0.85):
+                flow_rescue = bool(
+                    flow is not None
+                    and flow.confidence >= 0.55
+                    and track.lost_frames > 0
+                    and flow_distance <= gate
+                )
+                if (
+                    (distance <= gate or flow_rescue)
+                    and radius_delta <= max(30.0, pr * 0.85)
+                ):
                     frame_gap = max(1, track.lost_frames + 1)
                     measured_velocity = (
                         (
@@ -1413,12 +1714,12 @@ class LieDetectorTracker:
                         measured_velocity[1] - expected_velocity[1],
                     )
                     cost[row, col] = (
-                        distance
+                        association_distance
                         + 0.20 * radius_delta
                         - 10.0 * detection.yolo_confidence
                     )
                     innovation_quality = math.exp(
-                        -0.5 * (distance / 30.0) ** 2
+                        -0.5 * (association_distance / 30.0) ** 2
                     )
                     continuity_quality = (
                         math.exp(-max(0.0, acceleration_error - 4.0) / 10.0)
@@ -1426,8 +1727,15 @@ class LieDetectorTracker:
                         else 1.0
                     )
                     match_quality[row, col] = float(
-                        innovation_quality * continuity_quality
+                        innovation_quality
+                        * continuity_quality
+                        * (
+                            0.75 + 0.25 * flow.confidence
+                            if flow_weight > 0.0 and flow is not None
+                            else 1.0
+                        )
                     )
+                    flow_used[row, col] = flow_weight > 0.0
         if reserved_col is not None:
             cost[:, reserved_col] = large
 
@@ -1440,12 +1748,21 @@ class LieDetectorTracker:
                 detections[col],
                 timestamp,
                 association_quality=float(match_quality[row, col]),
+                flow_association_used=bool(flow_used[row, col]),
             )
+            if flow_used[row, col]:
+                self.flow_association_count += 1
             matched_tracks.add(row)
             matched_detections.add(col)
         for row, track in enumerate(track_list):
             if row not in matched_tracks:
-                track.mark_missed()
+                observation = flow_observations.get(track.id)
+                if self._flow_coast_is_safe(track, observation, detections):
+                    assert observation is not None
+                    track.apply_flow_coast(observation)
+                    self.flow_coast_count += 1
+                else:
+                    track.mark_missed()
         if reserved_col is not None and provisional_old is not None:
             detection = detections[reserved_col]
             child = self._spawn(detection, timestamp)
@@ -2117,6 +2434,17 @@ class LieDetectorTracker:
                     else False
                 ),
                 ranker_score=track.ranker_score,
+                flow_confidence=track.flow_confidence,
+                flow_forward_backward_error=(
+                    track.flow_forward_backward_error
+                ),
+                flow_inlier_ratio=track.flow_inlier_ratio,
+                flow_coverage=track.flow_coverage,
+                flow_local_fit_error=track.flow_local_fit_error,
+                flow_group_residual=track.flow_group_residual,
+                flow_group_confidence=track.flow_group_confidence,
+                flow_association_used=track.flow_association_used,
+                flow_coasted=track.flow_coasted,
             )
             for track in self.tracks.values()
             if track.lost_frames <= self.max_lost_frames
@@ -2339,6 +2667,16 @@ class LieDetectorTracker:
                     f"{prefix}_rotation_score_norm": float(
                         track.rotation_score / 180.0
                     ),
+                    f"{prefix}_rotation_delta_abs_norm": float(
+                        min(3.0, abs(math.degrees(track.last_rotation_delta)) / 22.0)
+                    ),
+                    f"{prefix}_peer_rotation_residual_norm": float(
+                        track.peer_rotation_residual / 180.0
+                    ),
+                    f"{prefix}_rotation_confidence": float(
+                        track.rotation_confidence
+                    ),
+                    f"{prefix}_rotation_valid": int(track.rotation_valid),
                     f"{prefix}_direction_score_norm": float(
                         track.direction_score / 180.0
                     ),
@@ -2373,11 +2711,58 @@ class LieDetectorTracker:
                     f"{prefix}_looks_background": int(
                         self._track_looks_like_background(track)
                     ),
+                    f"{prefix}_preflow_confidence": float(
+                        track.flow_confidence
+                    ),
+                    f"{prefix}_preflow_forward_backward_error_norm": float(
+                        np.clip(track.flow_forward_backward_error / 3.0, 0.0, 3.0)
+                    ),
+                    f"{prefix}_preflow_inlier_ratio": float(
+                        track.flow_inlier_ratio
+                    ),
+                    f"{prefix}_preflow_coverage": float(track.flow_coverage),
+                    f"{prefix}_preflow_local_fit_error_norm": float(
+                        np.clip(track.flow_local_fit_error / 5.0, 0.0, 3.0)
+                    ),
+                    f"{prefix}_preflow_group_residual_norm": float(
+                        track.flow_group_residual / diagonal
+                    ),
+                    f"{prefix}_preflow_group_confidence": float(
+                        track.flow_group_confidence
+                    ),
+                    f"{prefix}_preflow_association_used": int(
+                        track.flow_association_used
+                    ),
+                    f"{prefix}_flow_coasted": int(track.flow_coasted),
                 }
             )
 
         _add_track("current", current_track)
         _add_track("challenger", candidate)
+        switch_motion = (
+            {}
+            if self.switch_motion_history is None
+            else self.switch_motion_history.features(
+                (
+                    track.id
+                    for track in (current_track, candidate)
+                    if track is not None
+                ),
+                include_optical=self.switch_optical_features_enabled,
+                include_multilag=self.switch_multilag_features_enabled,
+            )
+        )
+        for prefix, track in (
+            ("current", current_track),
+            ("challenger", candidate),
+        ):
+            values = (
+                {}
+                if track is None
+                else switch_motion.get(track.id, {})
+            )
+            for name in SWITCH_MOTION_FEATURE_NAMES:
+                event[f"{prefix}_{name}"] = float(values.get(name, 0.0))
         if not basic_qualifies:
             event["path_support"] = 0.0
             event["ranker_evidence_after"] = float(
@@ -3075,6 +3460,9 @@ class LieDetectorTracker:
         self.identity_switched = False
         self.stale_recovery_committed = False
         self.ranker_switched = False
+        self.flow_observation_count = 0
+        self.flow_association_count = 0
+        self.flow_coast_count = 0
         self.switch_event = None
         self.switch_event_probability = 0.0
         self.switch_event_approved = False
@@ -3159,6 +3547,13 @@ class LieDetectorTracker:
                 detections.append(bright)
         detections = self._limit_patterns(detections)
 
+        flow_observations: dict[int, FlowTrackObservation] = {}
+        if self.preassociation_flow is not None:
+            flow_observations = self.preassociation_flow.observe(gray)
+            self.flow_observation_count = len(flow_observations)
+            for track in self.tracks.values():
+                track.set_flow_observation(flow_observations.get(track.id))
+
         rotation_edges = self._rotation_edge_map(gray)
         for detection in detections:
             detection.rotation_descriptor = self._rotation_descriptor(
@@ -3167,10 +3562,17 @@ class LieDetectorTracker:
             detection.appearance = self._appearance_descriptor(gray, detection)
 
         self._annotate_collective_motion(detections)
-        reassociation_committed = self._associate(detections, timestamp)
+        reassociation_committed = self._associate(
+            detections, timestamp, flow_observations
+        )
+        self._annotate_track_rotation_residuals()
         self._update_background_certificates(
             detections, bright, allow_bright_seed
         )
+        if self.switch_motion_history is not None:
+            self.switch_motion_history.update(
+                self._constellation_views(), gray_frame=gray
+            )
 
         if allow_bright_seed and bright is not None:
             # White highlight only seeds / reaffirms REAL; do not reclassify yet.
@@ -3180,6 +3582,21 @@ class LieDetectorTracker:
             self.identity_switched = (
                 self._assign_roles(gray) or reassociation_committed
             )
+        if self.preassociation_flow is not None:
+            flow_tracks: Iterable[_ShapeTrack]
+            if (
+                self.preassociation_flow_shadow_enabled
+                or self.flow_association_enabled
+            ):
+                flow_tracks = self.tracks.values()
+            else:
+                target_for_flow = (
+                    self.tracks.get(self.target_id)
+                    if self.target_id is not None
+                    else None
+                )
+                flow_tracks = () if target_for_flow is None else (target_for_flow,)
+            self.preassociation_flow.commit(gray, flow_tracks)
 
         target = self.tracks.get(self.target_id) if self.target_id is not None else None
         if (
@@ -3238,6 +3655,9 @@ class LieDetectorTracker:
                 switch_event=self.switch_event,
                 switch_event_probability=self.switch_event_probability,
                 switch_event_approved=self.switch_event_approved,
+                flow_observation_count=self.flow_observation_count,
+                flow_association_count=self.flow_association_count,
+                flow_coast_count=self.flow_coast_count,
                 constellation=constellation,
             )
 
@@ -3302,5 +3722,8 @@ class LieDetectorTracker:
             switch_event=self.switch_event,
             switch_event_probability=self.switch_event_probability,
             switch_event_approved=self.switch_event_approved,
+            flow_observation_count=self.flow_observation_count,
+            flow_association_count=self.flow_association_count,
+            flow_coast_count=self.flow_coast_count,
             constellation=constellation,
         )

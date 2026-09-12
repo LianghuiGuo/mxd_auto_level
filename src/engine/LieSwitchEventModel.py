@@ -8,10 +8,15 @@ from typing import Mapping
 
 import numpy as np
 
-from src.engine.LieIdentityRanker import LightGbmTextModel
+from src.engine.LieIdentityRanker import (
+    FLOW_FEATURE_NAMES,
+    MULTILAG_FEATURE_NAMES,
+    SWITCH_MOTION_FEATURE_NAMES,
+    LightGbmTextModel,
+)
 
 
-SWITCH_TRACK_FEATURE_NAMES = (
+SWITCH_TRACK_BASE_FEATURE_NAMES = (
     "radius_norm",
     "speed_norm",
     "translation_residual_norm",
@@ -29,6 +34,32 @@ SWITCH_TRACK_FEATURE_NAMES = (
     "bg_certified",
     "position_uncertainty_norm",
     "looks_background",
+)
+
+SWITCH_TRACK_ROTATION_FEATURE_NAMES = (
+    "rotation_delta_abs_norm",
+    "peer_rotation_residual_norm",
+    "rotation_confidence",
+    "rotation_valid",
+)
+
+SWITCH_TRACK_PREFLOW_FEATURE_NAMES = (
+    "preflow_confidence",
+    "preflow_forward_backward_error_norm",
+    "preflow_inlier_ratio",
+    "preflow_coverage",
+    "preflow_local_fit_error_norm",
+    "preflow_group_residual_norm",
+    "preflow_group_confidence",
+    "preflow_association_used",
+    "flow_coasted",
+)
+
+SWITCH_TRACK_FEATURE_NAMES = (
+    *SWITCH_TRACK_BASE_FEATURE_NAMES,
+    *SWITCH_TRACK_ROTATION_FEATURE_NAMES,
+    *SWITCH_TRACK_PREFLOW_FEATURE_NAMES,
+    *SWITCH_MOTION_FEATURE_NAMES,
 )
 
 SWITCH_EVENT_BASE_FEATURE_NAMES = (
@@ -117,6 +148,26 @@ class SwitchEventModel:
             raise ValueError(
                 f"switch-event model uses unavailable features: {sorted(missing)}"
             )
+        feature_names = set(self.model.feature_names)
+
+        def uses(names: tuple[str, ...]) -> bool:
+            return any(
+                feature == name or feature.endswith(f"_{name}")
+                for feature in feature_names
+                for name in names
+            )
+
+        self.needs_motion_features = bool(
+            uses(SWITCH_MOTION_FEATURE_NAMES)
+        )
+        self.needs_optical_features = bool(uses(FLOW_FEATURE_NAMES))
+        self.needs_multilag_features = bool(
+            uses(MULTILAG_FEATURE_NAMES)
+            or uses(("spin_estimator_agreement", "spin_joint_confidence"))
+        )
+        self.needs_preflow_features = bool(
+            uses(SWITCH_TRACK_PREFLOW_FEATURE_NAMES)
+        )
         self.min_probability = float(np.clip(min_probability, 0.0, 1.0))
 
     def predict_raw(self, event: Mapping[str, object]) -> float:

@@ -17,9 +17,62 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.engine.LieSwitchEventModel import (  # noqa: E402
+    SWITCH_EVENT_BASE_FEATURE_NAMES,
     SWITCH_EVENT_FEATURE_NAMES,
+    SWITCH_TRACK_BASE_FEATURE_NAMES,
+    SWITCH_TRACK_PREFLOW_FEATURE_NAMES,
+    SWITCH_TRACK_ROTATION_FEATURE_NAMES,
     build_switch_event_features,
 )
+from src.engine.LieIdentityRanker import (  # noqa: E402
+    FLOW_FEATURE_NAMES,
+    MULTILAG_FEATURE_NAMES,
+)
+
+
+def _event_feature_names(track_features: tuple[str, ...]) -> tuple[str, ...]:
+    return (
+        *SWITCH_EVENT_BASE_FEATURE_NAMES,
+        *(
+            f"{side}_{name}"
+            for side in ("current", "challenger")
+            for name in track_features
+        ),
+        *(f"delta_{name}" for name in track_features),
+    )
+
+
+FEATURE_SETS = {
+    "legacy": _event_feature_names(SWITCH_TRACK_BASE_FEATURE_NAMES),
+    "rotation": _event_feature_names(
+        (*SWITCH_TRACK_BASE_FEATURE_NAMES, *SWITCH_TRACK_ROTATION_FEATURE_NAMES)
+    ),
+    "preflow": _event_feature_names(
+        (
+            *SWITCH_TRACK_BASE_FEATURE_NAMES,
+            *SWITCH_TRACK_ROTATION_FEATURE_NAMES,
+            *SWITCH_TRACK_PREFLOW_FEATURE_NAMES,
+        )
+    ),
+    "optical": _event_feature_names(
+        (
+            *SWITCH_TRACK_BASE_FEATURE_NAMES,
+            *SWITCH_TRACK_ROTATION_FEATURE_NAMES,
+            *FLOW_FEATURE_NAMES,
+        )
+    ),
+    "optical-multilag": _event_feature_names(
+        (
+            *SWITCH_TRACK_BASE_FEATURE_NAMES,
+            *SWITCH_TRACK_ROTATION_FEATURE_NAMES,
+            *FLOW_FEATURE_NAMES,
+            *MULTILAG_FEATURE_NAMES,
+            "spin_estimator_agreement",
+            "spin_joint_confidence",
+        )
+    ),
+    "preflow-optical-multilag": SWITCH_EVENT_FEATURE_NAMES,
+}
 
 
 def _video_from_path(path: Path) -> str:
@@ -28,7 +81,15 @@ def _video_from_path(path: Path) -> str:
 
 
 def _load_events(
-    directory: Path, *, good_radius: float, bad_radius: float
+    directory: Path,
+    *,
+    good_radius: float,
+    bad_radius: float,
+    feature_names,
+    label_policy: str,
+    future_min_frames: int,
+    future_good_ratio: float,
+    future_wrong_ratio: float,
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
     examples: list[dict[str, object]] = []
     categories: Counter[str] = Counter()
@@ -37,20 +98,51 @@ def _load_events(
         with path.open(encoding="utf-8") as handle:
             for line in handle:
                 event = json.loads(line)
-                current_error = event.get("current_error_px")
-                challenger_error = event.get("challenger_error_px")
-                if current_error is None or challenger_error is None:
-                    categories["no_ground_truth"] += 1
-                    continue
-                if float(current_error) <= good_radius and float(challenger_error) >= bad_radius:
-                    label = 0
-                    category = "keep"
-                elif float(challenger_error) <= good_radius and float(current_error) >= bad_radius:
-                    label = 1
-                    category = "switch"
+                if label_policy == "future-window":
+                    window_frames = int(event.get("future_window_frames") or 0)
+                    if window_frames < future_min_frames:
+                        categories["future_too_short"] += 1
+                        continue
+                    current_good = float(event.get("future_current_good_ratio") or 0.0)
+                    challenger_good = float(
+                        event.get("future_challenger_good_ratio") or 0.0
+                    )
+                    if (
+                        current_good >= future_good_ratio
+                        and challenger_good <= future_wrong_ratio
+                    ):
+                        label = 0
+                        category = "keep"
+                    elif (
+                        challenger_good >= future_good_ratio
+                        and current_good <= future_wrong_ratio
+                    ):
+                        label = 1
+                        category = "switch"
+                    else:
+                        categories["ambiguous"] += 1
+                        continue
                 else:
-                    categories["ambiguous"] += 1
-                    continue
+                    current_error = event.get("current_error_px")
+                    challenger_error = event.get("challenger_error_px")
+                    if current_error is None or challenger_error is None:
+                        categories["no_ground_truth"] += 1
+                        continue
+                    if (
+                        float(current_error) <= good_radius
+                        and float(challenger_error) >= bad_radius
+                    ):
+                        label = 0
+                        category = "keep"
+                    elif (
+                        float(challenger_error) <= good_radius
+                        and float(current_error) >= bad_radius
+                    ):
+                        label = 1
+                        category = "switch"
+                    else:
+                        categories["ambiguous"] += 1
+                        continue
                 categories[category] += 1
                 if not bool(event.get("basic_qualifies", 0)):
                     categories[f"{category}_basic_rejected"] += 1
@@ -65,7 +157,7 @@ def _load_events(
                         "label": label,
                         "proposed": bool(event.get("proposed", 0)),
                         "x": np.asarray(
-                            [feature_map[name] for name in SWITCH_EVENT_FEATURE_NAMES],
+                            [feature_map[name] for name in feature_names],
                             dtype=np.float32,
                         ),
                     }
@@ -127,7 +219,7 @@ def _params(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _lovo_predictions(lgb, args, examples):
+def _lovo_predictions(lgb, args, examples, feature_names):
     predictions = np.full(len(examples), np.nan, dtype=np.float64)
     folds = []
     for video in sorted({str(item["video"]) for item in examples}):
@@ -142,7 +234,7 @@ def _lovo_predictions(lgb, args, examples):
                 x_train,
                 label=y_train,
                 weight=weights,
-                feature_name=list(SWITCH_EVENT_FEATURE_NAMES),
+                feature_name=list(feature_names),
             ),
             num_boost_round=args.n_estimators,
             callbacks=[lgb.log_evaluation(0)],
@@ -290,6 +382,20 @@ def parse_args():
     parser.add_argument("--min-keep-accuracy", type=float, default=0.90)
     parser.add_argument("--num-threads", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260912)
+    parser.add_argument(
+        "--label-policy",
+        choices=("instant", "future-window"),
+        default="instant",
+    )
+    parser.add_argument("--future-min-frames", type=int, default=5)
+    parser.add_argument("--future-good-ratio", type=float, default=0.60)
+    parser.add_argument("--future-wrong-ratio", type=float, default=0.25)
+    parser.add_argument(
+        "--feature-set",
+        choices=tuple(FEATURE_SETS),
+        default="optical-multilag",
+        help="cumulative switch-event feature ablation stage",
+    )
     return parser.parse_args()
 
 
@@ -300,13 +406,21 @@ def main() -> int:
         print(f"LightGBM unavailable: {error}")
         return 1
     args = parse_args()
+    feature_names = FEATURE_SETS[args.feature_set]
     examples, categories = _load_events(
-        args.events, good_radius=args.good_radius, bad_radius=args.bad_radius
+        args.events,
+        good_radius=args.good_radius,
+        bad_radius=args.bad_radius,
+        feature_names=feature_names,
+        label_policy=args.label_policy,
+        future_min_frames=args.future_min_frames,
+        future_good_ratio=args.future_good_ratio,
+        future_wrong_ratio=args.future_wrong_ratio,
     )
     examples.sort(key=lambda item: (item["video"], int(item["frame"])))
     if not examples or len({item["label"] for item in examples}) != 2:
         raise RuntimeError("event dataset needs both switch and keep examples")
-    predictions, folds = _lovo_predictions(lgb, args, examples)
+    predictions, folds = _lovo_predictions(lgb, args, examples, feature_names)
     (selection, proposed, all_basic), sweep = _select_threshold(
         examples, predictions, args
     )
@@ -317,7 +431,7 @@ def main() -> int:
             x,
             label=y,
             weight=weights,
-            feature_name=list(SWITCH_EVENT_FEATURE_NAMES),
+            feature_name=list(feature_names),
         ),
         num_boost_round=args.n_estimators,
         callbacks=[lgb.log_evaluation(0)],
@@ -328,11 +442,24 @@ def main() -> int:
     metrics = {
         "format_version": 1,
         "task": "on_policy_state_aware_switch_gate",
+        "feature_set": args.feature_set,
+        "feature_names": list(feature_names),
+        "label_policy_name": args.label_policy,
         "model": str(args.out),
         "events": str(args.events),
         "label_policy": {
-            "keep": f"current <= {args.good_radius}px and challenger >= {args.bad_radius}px",
-            "switch": f"challenger <= {args.good_radius}px and current >= {args.bad_radius}px",
+            "keep": (
+                f"future current good >= {args.future_good_ratio:.2f} and "
+                f"challenger good <= {args.future_wrong_ratio:.2f}"
+                if args.label_policy == "future-window"
+                else f"current <= {args.good_radius}px and challenger >= {args.bad_radius}px"
+            ),
+            "switch": (
+                f"future challenger good >= {args.future_good_ratio:.2f} and "
+                f"current good <= {args.future_wrong_ratio:.2f}"
+                if args.label_policy == "future-window"
+                else f"challenger <= {args.good_radius}px and current >= {args.bad_radius}px"
+            ),
             "ambiguous": "excluded",
             "green_cursor_features": False,
         },
@@ -351,7 +478,7 @@ def main() -> int:
         "threshold_sweep": sweep,
         "feature_importance_gain": dict(
             zip(
-                SWITCH_EVENT_FEATURE_NAMES,
+                feature_names,
                 [float(value) for value in booster.feature_importance(importance_type="gain")],
             )
         ),

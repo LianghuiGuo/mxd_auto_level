@@ -34,6 +34,11 @@ METRIC_KEYS = (
     "wrong_held_frames",
     "actionable_precision",
     "correct_actionable_recall",
+    "mean_processing_ms",
+    "p95_processing_ms",
+    "flow_observation_frames",
+    "flow_association_matches",
+    "flow_coast_frames",
 )
 
 
@@ -69,6 +74,11 @@ def main() -> int:
     parser.add_argument("--motion-corroboration-model", type=Path, default=None)
     parser.add_argument("--switch-event-model", type=Path, default=None)
     parser.add_argument("--switch-event-min-probability", type=float, default=0.5)
+    parser.add_argument("--switch-motion-features", action="store_true")
+    parser.add_argument("--preassociation-flow", action="store_true")
+    parser.add_argument("--flow-association", action="store_true")
+    parser.add_argument("--flow-coast", action="store_true")
+    parser.add_argument("--switch-label-window", type=int, default=12)
     parser.add_argument(
         "--switch-events-dir",
         type=Path,
@@ -110,6 +120,8 @@ def main() -> int:
             command += [
                 "--switch-events",
                 str(args.switch_events_dir / f"{label}_switch_events.jsonl"),
+                "--switch-label-window",
+                str(args.switch_label_window),
             ]
         if args.video:
             command += ["--output", str(args.out_dir / f"{label}_fourcue.mp4")]
@@ -148,6 +160,14 @@ def main() -> int:
                 "--switch-event-min-probability",
                 str(args.switch_event_min_probability),
             ]
+        if args.switch_motion_features:
+            command.append("--switch-motion-features")
+        if args.preassociation_flow:
+            command.append("--preassociation-flow")
+        if args.flow_association:
+            command.append("--flow-association")
+        if args.flow_coast:
+            command.append("--flow-coast")
         finished = subprocess.run(command, capture_output=True, text=True)
         if finished.returncode != 0:
             print(finished.stdout[-2000:], flush=True)

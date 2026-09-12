@@ -90,3 +90,9 @@ log/lie_switch_event_*/gate*/
 log/lie_switch_event_*/final/
 log/lie_switch_event_*/default_compat/
 log/lie_switch_event_*/gate*_summary.json
+# Rotation/switch optimization artifacts are reproducible; keep only reports.
+log/lie_rotation_optimization_*/*
+!log/lie_rotation_optimization_*/REPORT.md
+# Sparse-LK rebuild artifacts are reproducible; keep only reports.
+log/lie_flow_rebuild_*/*
+!log/lie_flow_rebuild_*/REPORT.md

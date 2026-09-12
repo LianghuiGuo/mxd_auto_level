@@ -9,6 +9,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ from src.engine.LieIdentityRanker import (  # noqa: E402
     AVAILABLE_FEATURE_NAMES,
     FLAT_FEATURE_NAMES,
     LightGbmTextModel,
+    SwitchMotionFeatureHistory,
     TrajectoryIdentityRanker,
     aggregate_history,
     extract_similarity_features,
@@ -26,6 +28,7 @@ from src.engine.LieIdentityRanker import (  # noqa: E402
 )
 from src.engine.LieSwitchEventModel import (  # noqa: E402
     SWITCH_EVENT_FEATURE_NAMES,
+    SWITCH_TRACK_PREFLOW_FEATURE_NAMES,
     SwitchEventModel,
     build_switch_event_features,
 )
@@ -100,6 +103,11 @@ class SwitchEventModelTest(unittest.TestCase):
         self.assertEqual(set(features), set(SWITCH_EVENT_FEATURE_NAMES))
         self.assertAlmostEqual(features["delta_radius_norm"], 0.03)
         self.assertTrue(all(np.isfinite(value) for value in features.values()))
+        self.assertIn("delta_optical_spin_evidence", features)
+        self.assertIn("delta_rotation_confidence", features)
+        self.assertIn("delta_peer_rotation_residual_norm", features)
+        self.assertIn("delta_preflow_group_residual_norm", features)
+        self.assertTrue(SWITCH_TRACK_PREFLOW_FEATURE_NAMES)
 
     def test_portable_switch_model_matches_lightgbm_probability(self) -> None:
         model_path = PROJECT_ROOT / "models" / "lie_switch_event_model.txt"
@@ -110,6 +118,7 @@ class SwitchEventModelTest(unittest.TestCase):
         except (ImportError, OSError):  # pragma: no cover
             self.skipTest("lightgbm runtime unavailable")
         portable = SwitchEventModel(model_path)
+        self.assertFalse(portable.needs_preflow_features)
         native = lgb.Booster(model_file=str(model_path))
         event = {
             "ranker_switch_delta": 2.4,
@@ -133,6 +142,28 @@ class SwitchEventModelTest(unittest.TestCase):
 
 
 class FeatureAndHistoryTest(unittest.TestCase):
+    def test_switch_motion_history_keeps_track_positions_frame_aligned(self) -> None:
+        history = SwitchMotionFeatureHistory()
+        frame = np.zeros((160, 240), dtype=np.uint8)
+        cv2.rectangle(frame, (65, 65), (95, 95), 220, 3)
+        views = [_View(1, (80.0, 80.0), radius=35.0)]
+        history.update(views, gray_frame=frame)
+        history.update(views, gray_frame=frame.copy())
+
+        features = history.features([1])
+
+        self.assertEqual(set(features[1]), {
+            "optical_spin_abs_norm",
+            "optical_spin_confidence",
+            "optical_spin_evidence",
+            "multilag_spin_abs_norm",
+            "multilag_spin_confidence",
+            "multilag_spin_consistency",
+            "spin_estimator_agreement",
+            "spin_joint_confidence",
+        })
+        self.assertTrue(all(np.isfinite(value) for value in features[1].values()))
+
     def test_flat_row_covers_all_features(self) -> None:
         views = [_View(1, (100.0, 100.0)), _View(2, (300.0, 200.0))]
         frame = extract_frame_features(

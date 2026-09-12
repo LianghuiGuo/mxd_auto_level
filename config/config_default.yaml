@@ -450,6 +450,13 @@ lie_detector:
   # Conservative gate on State-aware switch proposals.
   switch_event_model: "models/lie_switch_event_model.txt"
   switch_event_min_probability: 0.45
+  # Experimental sparse-LK stages. Association regressed on the 21-video
+  # replay, while target-only coast gained just 2/7706 correct frames for
+  # roughly 3.8% more latency. Keep all stages opt-in; enabling association or
+  # coast implicitly enables the pre-association observer.
+  preassociation_flow: false
+  flow_association: false
+  flow_coast: false
   # Panel presence is proven by matching the 谎言探测仪 title text; the ROI
   # estimator alone also fires on ordinary gameplay frames.
   title_template: "misc/lie_detector_title_cn.png"
@@ -457,6 +464,15 @@ lie_detector:
   panel_confirm_frames: 2
   panel_miss_frames: 3
   max_pointer_jump: 160
+  # Play one non-blocking local alert after the title has been confirmed for
+  # panel_confirm_frames consecutive frames. Empty sound_file uses the OS
+  # warning sound; set enabled/sound false to disable it.
+  alert:
+    enabled: true
+    sound: true
+    sound_repeat: 2
+    sound_interval_seconds: 0.18
+    sound_file: ""
   # Success dialog (确认 button) handling after the panel closes.
   confirm_wait_seconds: 12.0
   confirm_click_interval: 0.8

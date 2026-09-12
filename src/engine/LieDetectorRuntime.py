@@ -46,6 +46,8 @@ PHASE_CONFIRM = "confirm"
 class LieDetectorRuntimeResult:
     engaged: bool
     phase: str = PHASE_IDLE
+    panel_confirmed: bool = False
+    panel_just_confirmed: bool = False
     panel_roi: Optional[tuple[int, int, int, int]] = None
     tracking: Optional[LieDetectorTrackingResult] = None
     target_frame: Optional[tuple[float, float]] = None
@@ -274,6 +276,7 @@ class LieDetectorRuntime:
         self.phase = PHASE_IDLE
         self._seen_streak = 0
         self._miss_streak = 0
+        self._panel_confirmed = False
         self._roi: Optional[tuple[int, int, int, int]] = None
         self._confirm_deadline = 0.0
         self._confirm_clicks = 0
@@ -338,6 +341,16 @@ class LieDetectorRuntime:
                 switch_event_min_probability=float(
                     self.config.get("switch_event_min_probability", 0.5)
                 ),
+                switch_motion_features=bool(
+                    self.config.get("switch_motion_features", False)
+                ),
+                preassociation_flow=bool(
+                    self.config.get("preassociation_flow", False)
+                ),
+                flow_association=bool(
+                    self.config.get("flow_association", False)
+                ),
+                flow_coast=bool(self.config.get("flow_coast", False)),
             )
         return self._tracker
 
@@ -365,7 +378,10 @@ class LieDetectorRuntime:
             self._seen_streak = 0
             if self._miss_streak < self.miss_frames:
                 return LieDetectorRuntimeResult(
-                    engaged=True, phase=PHASE_PANEL, panel_roi=self._roi
+                    engaged=True,
+                    phase=PHASE_PANEL,
+                    panel_confirmed=self._panel_confirmed,
+                    panel_roi=self._roi,
                 )
             self._enter_confirm_phase(timestamp)
         if self.phase == PHASE_CONFIRM:
@@ -378,6 +394,12 @@ class LieDetectorRuntime:
         self._miss_streak = 0
         self._seen_streak += 1
         self.phase = PHASE_PANEL
+        panel_just_confirmed = bool(
+            not self._panel_confirmed
+            and self._seen_streak >= self.confirm_frames
+        )
+        if panel_just_confirmed:
+            self._panel_confirmed = True
 
         roi = self.roi_detector(frame_bgr)
         if roi is not None and self._valid_roi(roi, frame_bgr):
@@ -385,7 +407,12 @@ class LieDetectorRuntime:
         if self._roi is None:
             # Panel proven present but ROI not resolved yet: still pause the
             # bot, just don't touch the pointer.
-            return LieDetectorRuntimeResult(engaged=True, phase=PHASE_PANEL)
+            return LieDetectorRuntimeResult(
+                engaged=True,
+                phase=PHASE_PANEL,
+                panel_confirmed=self._panel_confirmed,
+                panel_just_confirmed=panel_just_confirmed,
+            )
 
         x, y, width, height = self._roi
         tracking = self._ensure_tracker().update(
@@ -404,6 +431,8 @@ class LieDetectorRuntime:
         return LieDetectorRuntimeResult(
             engaged=True,
             phase=PHASE_PANEL,
+            panel_confirmed=self._panel_confirmed,
+            panel_just_confirmed=panel_just_confirmed,
             panel_roi=self._roi,
             tracking=tracking,
             target_frame=target,

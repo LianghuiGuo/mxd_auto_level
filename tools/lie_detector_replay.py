@@ -377,6 +377,29 @@ def main() -> int:
     parser.add_argument(
         "--switch-event-min-probability", type=float, default=0.5
     )
+    parser.add_argument(
+        "--switch-motion-features",
+        action="store_true",
+        help=(
+            "capture optical-flow and multi-lag pair features even when the "
+            "loaded switch-event model does not require them"
+        ),
+    )
+    parser.add_argument(
+        "--preassociation-flow",
+        action="store_true",
+        help="observe cursor-blind sparse LK motion before track association",
+    )
+    parser.add_argument(
+        "--flow-association",
+        action="store_true",
+        help="blend high-confidence LK predictions into Hungarian association",
+    )
+    parser.add_argument(
+        "--flow-coast",
+        action="store_true",
+        help="use strict LK observations for at most three YOLO-missed frames",
+    )
     parser.add_argument("--yolo-conf", type=float, default=DEFAULT_CONFIDENCE)
     parser.add_argument("--yolo-imgsz", type=int, default=DEFAULT_IMAGE_SIZE)
     parser.add_argument("--yolo-stride", type=int, default=1)
@@ -387,6 +410,12 @@ def main() -> int:
         type=Path,
         default=None,
         help="optional JSONL with offline-labeled pre-commit switch snapshots",
+    )
+    parser.add_argument(
+        "--switch-label-window",
+        type=int,
+        default=12,
+        help="future frames used for offline switch-event outcome labels",
     )
     parser.add_argument("--no-video", action="store_true")
     args = parser.parse_args()
@@ -448,6 +477,10 @@ def main() -> int:
             else None
         ),
         switch_event_min_probability=args.switch_event_min_probability,
+        switch_motion_features=args.switch_motion_features,
+        preassociation_flow=args.preassociation_flow,
+        flow_association=args.flow_association,
+        flow_coast=args.flow_coast,
     )
     rows: list[dict[str, object]] = []
     errors: list[float] = []
@@ -463,6 +496,9 @@ def main() -> int:
     correct_held_frames = 0
     wrong_held_frames = 0
     predicted_only_frames = 0
+    flow_observation_frames = 0
+    flow_association_matches = 0
+    flow_coast_frames = 0
     # D: segmented metrics after cursor catch-up / after white fade.
     catchup_errors: list[float] = []
     postfade_errors: list[float] = []
@@ -473,6 +509,7 @@ def main() -> int:
     identity_switches = 0
     ranker_switches = 0
     switch_events: list[dict[str, object]] = []
+    offline_track_errors: dict[int, dict[int, float]] = {}
 
     writer = None
     if not args.no_video:
@@ -507,6 +544,13 @@ def main() -> int:
         started = time.perf_counter()
         result = tracker.update(frame, timestamp)
         processing_ms.append((time.perf_counter() - started) * 1000.0)
+        flow_observation_frames += int(
+            getattr(result, "flow_observation_count", 0) > 0
+        )
+        flow_association_matches += int(
+            getattr(result, "flow_association_count", 0)
+        )
+        flow_coast_frames += int(getattr(result, "flow_coast_count", 0) > 0)
         error = None
         # A strict cursor component is the offline-only indication that the
         # challenge is active.  It is never passed into the tracker.
@@ -594,6 +638,16 @@ def main() -> int:
                         )
                     )
             switch_events.append(event)
+        if ground_truth is not None:
+            offline_track_errors[frame_index - 1] = {
+                int(view.track_id): float(
+                    math.hypot(
+                        float(view.center[0]) - ground_truth[0],
+                        float(view.center[1]) - ground_truth[1],
+                    )
+                )
+                for view in (getattr(result, "constellation", None) or [])
+            }
         rows.append(
             {
                 "frame": frame_index - 1,
@@ -654,6 +708,13 @@ def main() -> int:
                 "switch_event_approved": int(
                     getattr(result, "switch_event_approved", False)
                 ),
+                "flow_observation_count": getattr(
+                    result, "flow_observation_count", 0
+                ),
+                "flow_association_count": getattr(
+                    result, "flow_association_count", 0
+                ),
+                "flow_coast_count": getattr(result, "flow_coast_count", 0),
                 "ranker_switched": int(result.ranker_switched),
                 "recovery_active": int(result.recovery_active),
                 "collective_promoted": int(result.collective_promoted),
@@ -683,6 +744,38 @@ def main() -> int:
             csv_writer.writeheader()
             csv_writer.writerows(rows)
     if args.switch_events is not None:
+        future_window = max(1, int(args.switch_label_window))
+        for event in switch_events:
+            start_frame = int(event["frame"])
+            frame_errors = [
+                offline_track_errors[frame]
+                for frame in range(start_frame, start_frame + future_window)
+                if frame in offline_track_errors
+            ]
+            event["future_window_frames"] = len(frame_errors)
+            for role in ("current", "challenger"):
+                track_id = event.get(f"{role}_id")
+                values = (
+                    []
+                    if track_id is None
+                    else [
+                        errors[int(track_id)]
+                        for errors in frame_errors
+                        if int(track_id) in errors
+                    ]
+                )
+                event[f"future_{role}_seen_frames"] = len(values)
+                event[f"future_{role}_good_ratio"] = (
+                    sum(value <= args.inside_radius for value in values)
+                    / max(1, len(frame_errors))
+                )
+                event[f"future_{role}_bad_ratio"] = (
+                    sum(value >= 60.0 for value in values)
+                    / max(1, len(frame_errors))
+                )
+                event[f"future_{role}_median_error_px"] = (
+                    None if not values else float(np.median(values))
+                )
         args.switch_events.parent.mkdir(parents=True, exist_ok=True)
         args.switch_events.write_text(
             "".join(
@@ -758,6 +851,9 @@ def main() -> int:
         ),
         "identity_switches": identity_switches,
         "ranker_switches": ranker_switches,
+        "flow_observation_frames": flow_observation_frames,
+        "flow_association_matches": flow_association_matches,
+        "flow_coast_frames": flow_coast_frames,
         "inside_radius_px": args.inside_radius,
         "mean_processing_ms": None if not processing_ms else float(np.mean(processing_ms)),
         "p95_processing_ms": percentile(processing_ms, 95),

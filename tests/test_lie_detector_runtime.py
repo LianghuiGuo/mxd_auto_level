@@ -129,9 +129,46 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         second = runtime.update(self.frame, 2.0)
 
         self.assertTrue(first.engaged)
+        self.assertFalse(first.panel_confirmed)
+        self.assertFalse(first.panel_just_confirmed)
         self.assertIsNone(first.target_frame)
+        self.assertTrue(second.panel_confirmed)
+        self.assertTrue(second.panel_just_confirmed)
         self.assertEqual(second.target_frame, (330.0, 160.0))
         self.assertEqual(tracker.calls, 2)
+
+    def test_panel_confirmation_event_is_emitted_once(self):
+        runtime = self._runtime([True], panel_confirm_frames=2)
+
+        first = runtime.update(self.frame, 1.0)
+        second = runtime.update(self.frame, 2.0)
+        third = runtime.update(self.frame, 3.0)
+
+        self.assertFalse(first.panel_just_confirmed)
+        self.assertTrue(second.panel_just_confirmed)
+        self.assertFalse(third.panel_just_confirmed)
+        self.assertTrue(third.panel_confirmed)
+
+        runtime.reset()
+        self.assertFalse(runtime.update(self.frame, 4.0).panel_just_confirmed)
+        self.assertTrue(runtime.update(self.frame, 5.0).panel_just_confirmed)
+
+    def test_panel_confirmation_does_not_require_roi_or_tracker(self):
+        tracker = _FakeTracker()
+        runtime = LieDetectorRuntime(
+            {"panel_confirm_frames": 2, "panel_miss_frames": 3},
+            panel_gate=_FakeGate([True]),
+            roi_detector=lambda _frame: None,
+            confirm_detector=lambda _frame: None,
+            tracker=tracker,
+        )
+
+        first = runtime.update(self.frame, 1.0)
+        second = runtime.update(self.frame, 2.0)
+
+        self.assertFalse(first.panel_just_confirmed)
+        self.assertTrue(second.panel_just_confirmed)
+        self.assertEqual(tracker.calls, 0)
 
     def test_non_actionable_track_never_moves_pointer(self):
         runtime = self._runtime(
@@ -165,6 +202,10 @@ class LieDetectorRuntimeTest(unittest.TestCase):
                 "motion_corroboration_model": "models/motion.txt",
                 "switch_event_model": "models/switch.txt",
                 "switch_event_min_probability": 0.65,
+                "switch_motion_features": True,
+                "preassociation_flow": True,
+                "flow_association": True,
+                "flow_coast": True,
             }
         )
 
@@ -180,6 +221,10 @@ class LieDetectorRuntimeTest(unittest.TestCase):
             motion_corroboration_model="models/motion.txt",
             switch_event_model="models/switch.txt",
             switch_event_min_probability=0.65,
+            switch_motion_features=True,
+            preassociation_flow=True,
+            flow_association=True,
+            flow_coast=True,
         )
 
     def test_short_panel_miss_holds_before_confirm_phase(self):

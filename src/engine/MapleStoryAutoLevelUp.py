@@ -39,6 +39,7 @@ from src.engine.HealthMonitor import HealthMonitor
 from src.engine.Profiler import Profiler
 from src.engine.RuneSolver import RuneSolver
 from src.engine.LieDetectorRuntime import LieDetectorRuntime
+from src.utils.LieAlert import LocalSoundAlert
 from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.states.hunting import HuntingState
 from src.states.finding_rune import FindingRuneState
@@ -151,6 +152,7 @@ class MapleStoryAutoBot:
         self.profiler = None # Profiler, for performance issue debugging
         self.rune_solver = None # Rune solver
         self.lie_detector_runtime = None
+        self.lie_sound_alert = None
         self._lie_last_pointer_target = None
         self._lie_jump_reject_streak = 0
         self._lie_active_logged = False
@@ -290,6 +292,18 @@ class MapleStoryAutoBot:
         lie_cfg.setdefault("confirm_wait_seconds", 12.0)
         lie_cfg.setdefault("confirm_click_interval", 0.8)
         lie_cfg.setdefault("confirm_max_clicks", 6)
+        alert_cfg = lie_cfg.setdefault("alert", {})
+        if not isinstance(alert_cfg, dict):
+            logger.warning(
+                "[Lie Detector] Invalid alert config; using local sound defaults."
+            )
+            alert_cfg = {}
+            lie_cfg["alert"] = alert_cfg
+        alert_cfg.setdefault("enabled", True)
+        alert_cfg.setdefault("sound", True)
+        alert_cfg.setdefault("sound_repeat", 2)
+        alert_cfg.setdefault("sound_interval_seconds", 0.18)
+        alert_cfg.setdefault("sound_file", "")
 
         # Backward-compatible defaults for custom YAML files created before
         # periodic chair rest existed.
@@ -496,8 +510,21 @@ class MapleStoryAutoBot:
                 pass
 
         self.lie_detector_runtime = None
+        self.lie_sound_alert = None
         if bool(self.cfg.get("lie_detector", {}).get("enabled", True)):
             try:
+                alert_cfg = self.cfg["lie_detector"].get("alert", {})
+                self.lie_sound_alert = LocalSoundAlert(
+                    enabled=bool(
+                        alert_cfg.get("enabled", True)
+                        and alert_cfg.get("sound", True)
+                    ),
+                    repeat=alert_cfg.get("sound_repeat", 2),
+                    interval_seconds=alert_cfg.get(
+                        "sound_interval_seconds", 0.18
+                    ),
+                    sound_file=str(alert_cfg.get("sound_file", "") or ""),
+                )
                 self.lie_detector_runtime = LieDetectorRuntime(
                     self.cfg["lie_detector"]
                 )
@@ -3822,6 +3849,12 @@ class MapleStoryAutoBot:
             self.img_frame_debug,
             self._lie_scale_result_for_debug(result, content),
         )
+        if result.panel_just_confirmed and self.lie_sound_alert is not None:
+            if self.lie_sound_alert.notify():
+                logger.warning(
+                    "[Lie Detector] Challenge confirmed; local sound alert "
+                    "scheduled."
+                )
         if not result.engaged:
             if self._lie_active_logged:
                 self.kb.automation_suspended = bool(
