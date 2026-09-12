@@ -352,11 +352,42 @@ def main() -> int:
         default=2.00,
         help="minimum top1-top2 ranker score gap before votes accumulate",
     )
+    parser.add_argument(
+        "--identity-safety",
+        action="store_true",
+        help="require experimental identity confidence before pointer action",
+    )
+    parser.add_argument(
+        "--state-aware-ranker",
+        action="store_true",
+        help="use decayed evidence and state-dependent ranker thresholds",
+    )
+    parser.add_argument(
+        "--motion-corroboration-model",
+        type=Path,
+        default=None,
+        help="optional motion ranker used only to corroborate identity switches",
+    )
+    parser.add_argument(
+        "--switch-event-model",
+        type=Path,
+        default=None,
+        help="optional binary model that vetoes State-aware switch proposals",
+    )
+    parser.add_argument(
+        "--switch-event-min-probability", type=float, default=0.5
+    )
     parser.add_argument("--yolo-conf", type=float, default=DEFAULT_CONFIDENCE)
     parser.add_argument("--yolo-imgsz", type=int, default=DEFAULT_IMAGE_SIZE)
     parser.add_argument("--yolo-stride", type=int, default=1)
     parser.add_argument("--output", type=Path, default=Path("log/lie_detector_replay.mp4"))
     parser.add_argument("--csv", type=Path, default=Path("log/lie_detector_replay.csv"))
+    parser.add_argument(
+        "--switch-events",
+        type=Path,
+        default=None,
+        help="optional JSONL with offline-labeled pre-commit switch snapshots",
+    )
     parser.add_argument("--no-video", action="store_true")
     args = parser.parse_args()
 
@@ -404,6 +435,19 @@ def main() -> int:
             else None
         ),
         identity_ranker_min_margin=args.identity_ranker_min_margin,
+        identity_safety=args.identity_safety,
+        state_aware_ranker=args.state_aware_ranker,
+        motion_corroboration_model=(
+            str(args.motion_corroboration_model)
+            if args.motion_corroboration_model is not None
+            else None
+        ),
+        switch_event_model=(
+            str(args.switch_event_model)
+            if args.switch_event_model is not None
+            else None
+        ),
+        switch_event_min_probability=args.switch_event_min_probability,
     )
     rows: list[dict[str, object]] = []
     errors: list[float] = []
@@ -412,6 +456,12 @@ def main() -> int:
     evaluated_frames = 0
     acquired_frames = 0
     actionable_frames = 0
+    position_actionable_frames = 0
+    correct_actionable_frames = 0
+    wrong_actionable_frames = 0
+    severe_wrong_actionable_frames = 0
+    correct_held_frames = 0
+    wrong_held_frames = 0
     predicted_only_frames = 0
     # D: segmented metrics after cursor catch-up / after white fade.
     catchup_errors: list[float] = []
@@ -422,6 +472,7 @@ def main() -> int:
     white_faded = False
     identity_switches = 0
     ranker_switches = 0
+    switch_events: list[dict[str, object]] = []
 
     writer = None
     if not args.no_video:
@@ -480,12 +531,25 @@ def main() -> int:
                 acquired_frames += 1
             if getattr(result, "actionable", False):
                 actionable_frames += 1
+            if getattr(result, "position_actionable", False):
+                position_actionable_frames += 1
             if result.predicted_only:
                 predicted_only_frames += 1
             if result.center is not None:
                 error = float(np.linalg.norm(np.subtract(result.center, ground_truth)))
                 errors.append(error)
                 covered.append(error <= args.inside_radius)
+                if getattr(result, "actionable", False):
+                    if error <= args.inside_radius:
+                        correct_actionable_frames += 1
+                    else:
+                        wrong_actionable_frames += 1
+                        if error > 100.0:
+                            severe_wrong_actionable_frames += 1
+                elif error <= args.inside_radius:
+                    correct_held_frames += 1
+                else:
+                    wrong_held_frames += 1
                 # Catch-up: human cursor stays within 40px for 5 frames.
                 if error <= 40.0:
                     catchup_streak += 1
@@ -497,6 +561,39 @@ def main() -> int:
                     catchup_errors.append(error)
                 if white_faded and catchup_started:
                     postfade_errors.append(error)
+        switch_event = getattr(result, "switch_event", None)
+        if switch_event is not None:
+            event = dict(switch_event)
+            event.update(
+                {
+                    "video": args.video.name,
+                    "frame": frame_index - 1,
+                    "timestamp": timestamp,
+                    "evaluation_phase": phase.value,
+                    "ground_truth_x": (
+                        None if ground_truth is None else float(ground_truth[0])
+                    ),
+                    "ground_truth_y": (
+                        None if ground_truth is None else float(ground_truth[1])
+                    ),
+                    "committed": int(getattr(result, "ranker_switched", False)),
+                }
+            )
+            if ground_truth is not None:
+                for role in ("current", "challenger"):
+                    center_x = event.get(f"{role}_x")
+                    center_y = event.get(f"{role}_y")
+                    event[f"{role}_error_px"] = (
+                        None
+                        if center_x is None or center_y is None
+                        else float(
+                            math.hypot(
+                                float(center_x) - ground_truth[0],
+                                float(center_y) - ground_truth[1],
+                            )
+                        )
+                    )
+            switch_events.append(event)
         rows.append(
             {
                 "frame": frame_index - 1,
@@ -508,6 +605,19 @@ def main() -> int:
                 "radius": "" if result.radius is None else f"{result.radius:.3f}",
                 "confidence": f"{result.confidence:.4f}",
                 "actionable": int(getattr(result, "actionable", False)),
+                "position_actionable": int(
+                    getattr(result, "position_actionable", False)
+                ),
+                "identity_safe": int(
+                    getattr(result, "identity_safe", False)
+                ),
+                "identity_confidence": (
+                    f"{getattr(result, 'identity_confidence', 0.0):.6f}"
+                ),
+                "identity_state": getattr(
+                    result, "identity_state", "uninitialized"
+                ),
+                "hold_reason": getattr(result, "hold_reason", None) or "",
                 "position_uncertainty_px": (
                     f"{getattr(result, 'position_uncertainty_px', 0.0):.3f}"
                 ),
@@ -530,6 +640,20 @@ def main() -> int:
                     else result.ranker_candidate_id
                 ),
                 "ranker_margin": f"{result.ranker_margin:.6f}",
+                "ranker_top_id": (
+                    "" if result.ranker_top_id is None else result.ranker_top_id
+                ),
+                "ranker_current_rank": result.ranker_current_rank,
+                "ranker_current_score": f"{result.ranker_current_score:.6f}",
+                "ranker_switch_delta": f"{result.ranker_switch_delta:.6f}",
+                "ranker_evidence": f"{result.ranker_evidence:.6f}",
+                "motion_corroborated": int(result.motion_corroborated),
+                "switch_event_probability": (
+                    f"{getattr(result, 'switch_event_probability', 0.0):.6f}"
+                ),
+                "switch_event_approved": int(
+                    getattr(result, "switch_event_approved", False)
+                ),
                 "ranker_switched": int(result.ranker_switched),
                 "recovery_active": int(result.recovery_active),
                 "collective_promoted": int(result.collective_promoted),
@@ -558,6 +682,15 @@ def main() -> int:
         if fieldnames:
             csv_writer.writeheader()
             csv_writer.writerows(rows)
+    if args.switch_events is not None:
+        args.switch_events.parent.mkdir(parents=True, exist_ok=True)
+        args.switch_events.write_text(
+            "".join(
+                json.dumps(event, ensure_ascii=False) + "\n"
+                for event in switch_events
+            ),
+            encoding="utf-8",
+        )
 
     summary = {
         "video": str(args.video),
@@ -569,6 +702,22 @@ def main() -> int:
         "acquired_frame_ratio": acquired_frames / evaluated_frames if evaluated_frames else 0.0,
         "actionable_frame_ratio": (
             actionable_frames / evaluated_frames if evaluated_frames else 0.0
+        ),
+        "position_actionable_frame_ratio": (
+            position_actionable_frames / evaluated_frames
+            if evaluated_frames else 0.0
+        ),
+        "correct_actionable_frames": correct_actionable_frames,
+        "wrong_actionable_frames": wrong_actionable_frames,
+        "severe_wrong_actionable_frames": severe_wrong_actionable_frames,
+        "correct_held_frames": correct_held_frames,
+        "wrong_held_frames": wrong_held_frames,
+        "actionable_precision": (
+            correct_actionable_frames
+            / max(1, correct_actionable_frames + wrong_actionable_frames)
+        ),
+        "correct_actionable_recall": (
+            correct_actionable_frames / max(1, int(np.sum(covered)))
         ),
         "predicted_only_frame_ratio": predicted_only_frames / evaluated_frames if evaluated_frames else 0.0,
         "evaluated_error_frames": len(errors),
@@ -614,6 +763,10 @@ def main() -> int:
         "p95_processing_ms": percentile(processing_ms, 95),
         "output_video": None if args.no_video else str(args.output),
         "output_csv": str(args.csv),
+        "switch_events": (
+            None if args.switch_events is None else str(args.switch_events)
+        ),
+        "switch_event_count": len(switch_events),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

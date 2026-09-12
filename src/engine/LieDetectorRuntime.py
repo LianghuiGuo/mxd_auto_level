@@ -323,6 +323,21 @@ class LieDetectorRuntime:
                 identity_ranker_min_margin=float(
                     self.config.get("identity_ranker_min_margin", 2.00)
                 ),
+                identity_safety=bool(
+                    self.config.get("identity_safety", False)
+                ),
+                state_aware_ranker=bool(
+                    self.config.get("state_aware_ranker", False)
+                ),
+                motion_corroboration_model=(
+                    self.config.get("motion_corroboration_model") or None
+                ),
+                switch_event_model=(
+                    self.config.get("switch_event_model") or None
+                ),
+                switch_event_min_probability=float(
+                    self.config.get("switch_event_min_probability", 0.5)
+                ),
             )
         return self._tracker
 

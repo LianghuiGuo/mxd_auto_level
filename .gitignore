@@ -77,3 +77,16 @@ log/lie_ranker_ab_*/ranker_margin_*/
 log/lie_ranker_ab_*/ranker_final/
 log/lie_motion_ablation_*/margin_*/
 log/lie_motion_ablation_*/final_visualizations/
+# Per-frame identity-decision ablation CSVs. Keep reports and summaries.
+log/lie_identity_decision_ablation_*/baseline/
+log/lie_identity_decision_ablation_*/safety/
+log/lie_identity_decision_ablation_*/state/
+log/lie_identity_decision_ablation_*/state_safety/
+log/lie_identity_decision_ablation_*/motion/
+# Per-frame switch-event training captures. Keep compact metrics/models only.
+log/lie_switch_event_*/raw/
+log/lie_switch_event_*/replay/
+log/lie_switch_event_*/gate*/
+log/lie_switch_event_*/final/
+log/lie_switch_event_*/default_compat/
+log/lie_switch_event_*/gate*_summary.json

@@ -160,6 +160,11 @@ class LieDetectorRuntimeTest(unittest.TestCase):
                 "identity_ranker_min_margin": 2.0,
                 "multi_hypothesis_identity": True,
                 "stale_coast_recovery": True,
+                "identity_safety": True,
+                "state_aware_ranker": True,
+                "motion_corroboration_model": "models/motion.txt",
+                "switch_event_model": "models/switch.txt",
+                "switch_event_min_probability": 0.65,
             }
         )
 
@@ -170,6 +175,11 @@ class LieDetectorRuntimeTest(unittest.TestCase):
             stale_coast_recovery=True,
             identity_ranker_model="models/lie_identity_ranker.txt",
             identity_ranker_min_margin=2.0,
+            identity_safety=True,
+            state_aware_ranker=True,
+            motion_corroboration_model="models/motion.txt",
+            switch_event_model="models/switch.txt",
+            switch_event_min_probability=0.65,
         )
 
     def test_short_panel_miss_holds_before_confirm_phase(self):

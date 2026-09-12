@@ -26,6 +26,14 @@ METRIC_KEYS = (
     "prediction_coverage_ratio",
     "acquired_frame_ratio",
     "actionable_frame_ratio",
+    "position_actionable_frame_ratio",
+    "correct_actionable_frames",
+    "wrong_actionable_frames",
+    "severe_wrong_actionable_frames",
+    "correct_held_frames",
+    "wrong_held_frames",
+    "actionable_precision",
+    "correct_actionable_recall",
 )
 
 
@@ -56,6 +64,17 @@ def main() -> int:
     parser.add_argument("--stale-coast-recovery", action="store_true")
     parser.add_argument("--identity-ranker-model", type=Path, default=None)
     parser.add_argument("--identity-ranker-min-margin", type=float, default=2.00)
+    parser.add_argument("--identity-safety", action="store_true")
+    parser.add_argument("--state-aware-ranker", action="store_true")
+    parser.add_argument("--motion-corroboration-model", type=Path, default=None)
+    parser.add_argument("--switch-event-model", type=Path, default=None)
+    parser.add_argument("--switch-event-min-probability", type=float, default=0.5)
+    parser.add_argument(
+        "--switch-events-dir",
+        type=Path,
+        default=None,
+        help="optional directory for per-clip switch-event JSONL diagnostics",
+    )
     parser.add_argument(
         "--clips",
         default=None,
@@ -87,6 +106,11 @@ def main() -> int:
             "--csv",
             str(args.out_dir / f"{label}_fourcue.csv"),
         ]
+        if args.switch_events_dir is not None:
+            command += [
+                "--switch-events",
+                str(args.switch_events_dir / f"{label}_switch_events.jsonl"),
+            ]
         if args.video:
             command += ["--output", str(args.out_dir / f"{label}_fourcue.mp4")]
         else:
@@ -107,6 +131,22 @@ def main() -> int:
                 str(args.identity_ranker_model),
                 "--identity-ranker-min-margin",
                 str(args.identity_ranker_min_margin),
+            ]
+        if args.identity_safety:
+            command.append("--identity-safety")
+        if args.state_aware_ranker:
+            command.append("--state-aware-ranker")
+        if args.motion_corroboration_model is not None:
+            command += [
+                "--motion-corroboration-model",
+                str(args.motion_corroboration_model),
+            ]
+        if args.switch_event_model is not None:
+            command += [
+                "--switch-event-model",
+                str(args.switch_event_model),
+                "--switch-event-min-probability",
+                str(args.switch_event_min_probability),
             ]
         finished = subprocess.run(command, capture_output=True, text=True)
         if finished.returncode != 0:

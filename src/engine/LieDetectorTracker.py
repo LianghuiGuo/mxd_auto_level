@@ -24,6 +24,7 @@ import numpy as np
 
 from src.engine.LieBackgroundCertificates import LieBackgroundCertificates
 from src.engine.LieIdentityRanker import TrajectoryIdentityRanker
+from src.engine.LieSwitchEventModel import SwitchEventModel
 
 try:
     from scipy.optimize import linear_sum_assignment
@@ -89,6 +90,11 @@ _RANKER_MIN_MARGIN = 2.00
 _RANKER_SWITCH_VOTES = 5
 _RANKER_RECOVERY_VOTES = 3
 _IDENTITY_SWITCH_COOLDOWN = 10
+_IDENTITY_SAFETY_COAST_GRACE = 14
+_STATE_AWARE_RECOVERY_COAST = 14
+_SWITCH_EVENT_VISIBLE_MIN_DELTA = 0.50
+_SWITCH_EVENT_ROLLBACK_WINDOW = 12
+_SWITCH_EVENT_ROLLBACK_EVIDENCE = 1.20
 TrackRole = Literal["real", "bg", "unknown"]
 
 
@@ -180,6 +186,23 @@ class LieDetectorTrackingResult:
     ranker_candidate_id: Optional[int] = None
     ranker_margin: float = 0.0
     ranker_switched: bool = False
+    ranker_top_id: Optional[int] = None
+    ranker_current_rank: int = 0
+    ranker_current_score: float = 0.0
+    ranker_switch_delta: float = 0.0
+    ranker_evidence: float = 0.0
+    motion_corroborated: bool = False
+    identity_confidence: float = 0.0
+    identity_state: str = "uninitialized"
+    identity_safe: bool = False
+    hold_reason: Optional[str] = None
+    position_actionable: bool = False
+    # Pre-commit current/challenger snapshot for offline switch-event
+    # supervision. It contains tracker/ranker state only; the replay tool adds
+    # the cursor-derived label after ``update`` returns.
+    switch_event: Optional[dict[str, object]] = None
+    switch_event_probability: float = 0.0
+    switch_event_approved: bool = False
     constellation: list[ConstellationTrackView] = field(default_factory=list)
 
 
@@ -490,6 +513,11 @@ class LieDetectorTracker:
         stale_coast_recovery: bool = False,
         identity_ranker_model: Optional[str] = None,
         identity_ranker_min_margin: float = _RANKER_MIN_MARGIN,
+        identity_safety: bool = False,
+        state_aware_ranker: bool = False,
+        motion_corroboration_model: Optional[str] = None,
+        switch_event_model: Optional[str] = None,
+        switch_event_min_probability: float = 0.5,
     ) -> None:
         self.min_radius = int(min_radius)
         self.max_radius = int(max_radius)
@@ -518,6 +546,23 @@ class LieDetectorTracker:
         )
         self.identity_ranker_min_margin = max(
             0.0, float(identity_ranker_min_margin)
+        )
+        # Experimental identity-decision controls.  All are opt-in so the
+        # production defaults keep their previous behaviour during ablation.
+        self.identity_safety_enabled = bool(identity_safety)
+        self.state_aware_ranker_enabled = bool(state_aware_ranker)
+        self.motion_corroboration_ranker = (
+            None
+            if not motion_corroboration_model
+            else TrajectoryIdentityRanker(motion_corroboration_model)
+        )
+        self.switch_event_model = (
+            None
+            if not switch_event_model
+            else SwitchEventModel(
+                switch_event_model,
+                min_probability=switch_event_min_probability,
+            )
         )
         self.reset()
 
@@ -568,8 +613,33 @@ class LieDetectorTracker:
         self.ranker_candidate_streak = 0
         self.ranker_margin = 0.0
         self.ranker_switched = False
+        self.ranker_top_id: Optional[int] = None
+        self.ranker_current_rank = 0
+        self.ranker_current_score = 0.0
+        self.ranker_switch_delta = 0.0
+        self.ranker_evidence = 0.0
+        self.ranker_evidence_by_id: dict[int, float] = {}
+        self.ranker_disagreement_streak = 0
+        self.state_aware_legacy_candidate_id: Optional[int] = None
+        self.state_aware_legacy_candidate_streak = 0
+        self.motion_corroborated = False
+        self.switch_event: Optional[dict[str, object]] = None
+        self.switch_event_probability = 0.0
+        self.switch_event_approved = False
+        self.recent_ranker_switch_previous_id: Optional[int] = None
+        self.recent_ranker_switch_age = 0
+        self.identity_confidence = 0.0
+        self.identity_state = "uninitialized"
+        self.identity_safe = False
+        self.identity_match_streak = 0
+        self.identity_mismatch_streak = 0
+        self.identity_ranker_unavailable_frames = 0
+        self.identity_probation_frames = 0
+        self.hold_reason: Optional[str] = "uninitialized"
         if self.identity_ranker is not None:
             self.identity_ranker.reset()
+        if self.motion_corroboration_ranker is not None:
+            self.motion_corroboration_ranker.reset()
         if self.candidate_detector is not None:
             self.candidate_detector.reset()
 
@@ -2058,11 +2128,23 @@ class LieDetectorTracker:
         gray: Optional[np.ndarray] = None,
     ) -> Optional[_ShapeTrack]:
         self.ranker_margin = 0.0
+        self.ranker_top_id = None
+        self.ranker_current_rank = 0
+        self.ranker_current_score = 0.0
+        self.ranker_switch_delta = 0.0
+        self.ranker_evidence = 0.0
+        self.motion_corroborated = False
+        self.switch_event = None
+        self.switch_event_probability = 0.0
+        self.switch_event_approved = False
         if self.identity_ranker is None or self.frame_size is None:
+            self.state_aware_legacy_candidate_id = None
+            self.state_aware_legacy_candidate_streak = 0
             return None
         width, height = self.frame_size
+        views = self._constellation_views()
         ranker_scores = self.identity_ranker.update(
-            self._constellation_views(),
+            views,
             target_id=self.target_id,
             frame_width=width,
             frame_height=height,
@@ -2073,6 +2155,8 @@ class LieDetectorTracker:
         if len(ranker_scores) < 2:
             self.ranker_candidate_id = None
             self.ranker_candidate_streak = 0
+            self.state_aware_legacy_candidate_id = None
+            self.state_aware_legacy_candidate_streak = 0
             return None
         ranked = sorted(
             ranker_scores.items(),
@@ -2080,46 +2164,475 @@ class LieDetectorTracker:
             reverse=True,
         )
         best_id, best_score = ranked[0]
+        self.ranker_top_id = int(best_id)
         self.ranker_margin = float(best_score - ranked[1][1])
-        if best_id == self.target_id or self.ranker_margin < self.identity_ranker_min_margin:
+        if self.target_id in ranker_scores:
+            self.ranker_current_score = float(ranker_scores[self.target_id])
+            self.ranker_current_rank = 1 + next(
+                index
+                for index, (track_id, _score) in enumerate(ranked)
+                if track_id == self.target_id
+            )
+            self.ranker_switch_delta = float(
+                best_score - ranker_scores[self.target_id]
+            )
+        else:
+            self.ranker_current_rank = len(ranked) + 1
+            self.ranker_switch_delta = float(max(0.0, self.ranker_margin))
+
+        if best_id == self.target_id:
+            self.ranker_disagreement_streak = 0
+            self.identity_mismatch_streak = 0
+            self.identity_match_streak = getattr(
+                self, "identity_match_streak", 0
+            ) + 1
+        else:
+            self.ranker_disagreement_streak = getattr(
+                self, "ranker_disagreement_streak", 0
+            ) + 1
+            self.identity_mismatch_streak = getattr(
+                self, "identity_mismatch_streak", 0
+            ) + 1
+            self.identity_match_streak = 0
+
+        motion_ranker = getattr(self, "motion_corroboration_ranker", None)
+        if motion_ranker is not None:
+            motion_scores = motion_ranker.update(
+                views,
+                target_id=self.target_id,
+                frame_width=width,
+                frame_height=height,
+                gray_frame=gray,
+            )
+            if motion_scores:
+                motion_best_id = max(motion_scores, key=motion_scores.get)
+                motion_current = motion_scores.get(self.target_id, -float("inf"))
+                self.motion_corroborated = bool(
+                    motion_best_id == best_id
+                    and best_id != self.target_id
+                    and motion_scores[motion_best_id] - motion_current >= 0.25
+                )
+
+        if not getattr(self, "state_aware_ranker_enabled", False):
+            if (
+                best_id == self.target_id
+                or self.ranker_margin < self.identity_ranker_min_margin
+            ):
+                self.ranker_candidate_id = None
+                self.ranker_candidate_streak = 0
+                return None
+            candidate = self.tracks.get(best_id)
+            qualifies = (
+                candidate is not None
+                and candidate.lost_frames == 0
+                and not candidate.predicted_only
+                and candidate.visible_streak >= 5
+                and candidate.motion_reliability >= 0.10
+                and not self._leaving_frame(candidate)
+                and (
+                    current_track is None
+                    or not self.multi_hypothesis_identity_enabled
+                    or self._identity_paths_allow_switch(current_track, candidate)
+                )
+            )
+            if not qualifies:
+                self.ranker_candidate_id = None
+                self.ranker_candidate_streak = 0
+                return None
+            if self.ranker_candidate_id == best_id:
+                self.ranker_candidate_streak += 1
+            else:
+                self.ranker_candidate_id = best_id
+                self.ranker_candidate_streak = 1
+            votes_needed = (
+                _RANKER_RECOVERY_VOTES
+                if current_track is None
+                or current_track.lost_frames > _REAL_COAST_GRACE
+                or current_track.predicted_only
+                else _RANKER_SWITCH_VOTES
+            )
+            return (
+                candidate
+                if self.ranker_candidate_streak >= votes_needed
+                else None
+            )
+
+        # Experimental state-aware mode. Evidence decays instead of resetting
+        # on a single ambiguous frame, and identity-path disagreement is a soft
+        # penalty except for geometrically impossible candidates.
+        self.ranker_evidence_by_id = {
+            track_id: evidence * 0.82
+            for track_id, evidence in self.ranker_evidence_by_id.items()
+            if track_id in ranker_scores and evidence * 0.82 >= 0.05
+        }
+        if best_id == self.target_id:
             self.ranker_candidate_id = None
             self.ranker_candidate_streak = 0
+            self.state_aware_legacy_candidate_id = None
+            self.state_aware_legacy_candidate_streak = 0
             return None
         candidate = self.tracks.get(best_id)
-        qualifies = (
+        basic_qualifies = (
             candidate is not None
             and candidate.lost_frames == 0
             and not candidate.predicted_only
+            and candidate.visible_streak >= 3
+            and candidate.motion_reliability >= 0.05
+            and not self._leaving_frame(candidate)
+        )
+        event: dict[str, object] = {
+            "current_id": self.target_id,
+            "challenger_id": int(best_id),
+            "candidate_count": len(ranker_scores),
+            "ranker_switch_delta": float(self.ranker_switch_delta),
+            "ranker_top_margin": float(self.ranker_margin),
+            "ranker_current_score": float(self.ranker_current_score),
+            "ranker_current_rank": int(self.ranker_current_rank),
+            "ranker_disagreement_streak": int(self.ranker_disagreement_streak),
+            "ranker_evidence_before": float(
+                self.ranker_evidence_by_id.get(best_id, 0.0)
+            ),
+            "motion_corroborated": int(self.motion_corroborated),
+            "basic_qualifies": int(basic_qualifies),
+        }
+
+        def _add_track(prefix: str, track: Optional[_ShapeTrack]) -> None:
+            if track is None:
+                event.update(
+                    {
+                        f"{prefix}_present": 0,
+                        f"{prefix}_x": None,
+                        f"{prefix}_y": None,
+                    }
+                )
+                return
+            diagonal = max(1.0, math.hypot(*self.frame_size))
+            association = (
+                float(np.median(track.association_quality_history[-3:]))
+                if track.association_quality_history
+                else 0.0
+            )
+            yolo_confidence = (
+                float(track.last_detection.yolo_confidence)
+                if track.last_detection is not None
+                else 0.0
+            )
+            appearance = min(
+                2.0,
+                self._appearance_distance(
+                    self.target_appearance_anchor, track.appearance
+                ),
+            )
+            event.update(
+                {
+                    f"{prefix}_present": 1,
+                    f"{prefix}_x": float(track.state[0]),
+                    f"{prefix}_y": float(track.state[1]),
+                    f"{prefix}_radius_norm": float(track.state[2])
+                    / max(1.0, min(self.frame_size)),
+                    f"{prefix}_speed_norm": float(
+                        np.linalg.norm(track.predicted_velocity) / diagonal
+                    ),
+                    f"{prefix}_translation_residual_norm": float(
+                        track.translation_residual / diagonal
+                    ),
+                    f"{prefix}_rotation_score_norm": float(
+                        track.rotation_score / 180.0
+                    ),
+                    f"{prefix}_direction_score_norm": float(
+                        track.direction_score / 180.0
+                    ),
+                    f"{prefix}_speed_score_norm": float(
+                        track.speed_score / diagonal
+                    ),
+                    f"{prefix}_rigidity_score_norm": float(
+                        track.rigidity_score / diagonal
+                    ),
+                    f"{prefix}_motion_reliability": float(
+                        track.motion_reliability
+                    ),
+                    f"{prefix}_visible_streak_norm": float(
+                        np.clip(track.visible_streak / 60.0, 0.0, 1.0)
+                    ),
+                    f"{prefix}_lost_frames_norm": float(
+                        np.clip(track.lost_frames / 10.0, 0.0, 1.0)
+                    ),
+                    f"{prefix}_predicted_only": int(track.predicted_only),
+                    f"{prefix}_appearance_distance": float(appearance),
+                    f"{prefix}_association_quality": float(association),
+                    f"{prefix}_yolo_confidence": float(yolo_confidence),
+                    f"{prefix}_bg_certified": int(
+                        bool(
+                            track.last_detection is not None
+                            and track.last_detection.bg_certified
+                        )
+                    ),
+                    f"{prefix}_position_uncertainty_norm": float(
+                        track.position_uncertainty / diagonal
+                    ),
+                    f"{prefix}_looks_background": int(
+                        self._track_looks_like_background(track)
+                    ),
+                }
+            )
+
+        _add_track("current", current_track)
+        _add_track("challenger", candidate)
+        if not basic_qualifies:
+            event["path_support"] = 0.0
+            event["ranker_evidence_after"] = float(
+                event["ranker_evidence_before"]
+            )
+            event["threshold"] = None
+            event["proposed"] = 0
+            self.switch_event = event
+            self.ranker_candidate_id = None
+            self.ranker_candidate_streak = 0
+            self.state_aware_legacy_candidate_id = None
+            self.state_aware_legacy_candidate_streak = 0
+            return None
+
+        path_support = 1.0
+        if current_track is not None and self.multi_hypothesis_identity_enabled:
+            path_support = (
+                1.0
+                if self._identity_paths_allow_switch(current_track, candidate)
+                else 0.55
+            )
+        normalized_delta = float(np.clip(self.ranker_switch_delta / 2.0, 0.0, 1.0))
+        support = (0.35 + 0.65 * normalized_delta) * path_support
+        if self.ranker_margin >= self.identity_ranker_min_margin:
+            support += 0.25
+        if self.motion_corroborated:
+            support += 0.35
+        if self.ranker_current_rank >= 3:
+            support += 0.15
+        evidence = self.ranker_evidence_by_id.get(best_id, 0.0) + support
+        self.ranker_evidence_by_id[best_id] = evidence
+        self.ranker_candidate_id = best_id
+        self.ranker_evidence = float(evidence)
+        self.ranker_candidate_streak = int(round(evidence))
+
+        recovery = bool(
+            current_track is None
+            or current_track.lost_frames > _STATE_AWARE_RECOVERY_COAST
+        )
+        recent_rollback = bool(
+            self.switch_event_model is not None
+            and self.recent_ranker_switch_previous_id == best_id
+            and self.recent_ranker_switch_age
+            <= _SWITCH_EVENT_ROLLBACK_WINDOW
+        )
+        current_suspicious = bool(
+            recovery
+            or self.ranker_disagreement_streak >= 2
+            or self.ranker_current_rank >= 3
+            or (
+                current_track is not None
+                and self._track_looks_like_background(current_track)
+            )
+        )
+        # A short, position-confident coast is not by itself evidence that the
+        # identity is wrong. Low-margin challengers must wait through that
+        # grace period; visible-but-suspicious identities can still recover
+        # quickly. Motion corroboration already contributes to ``support`` and
+        # therefore is not also applied as a second threshold discount.
+        short_coast = bool(
+            current_track is not None
+            and current_track.predicted_only
+            and not recovery
+        )
+        threshold = (
+            1.8
+            if recovery
+            else 4.2
+            if short_coast
+            else 2.6
+            if current_suspicious
+            else 4.2
+        )
+        if recent_rollback:
+            threshold = min(threshold, _SWITCH_EVENT_ROLLBACK_EVIDENCE)
+        legacy_qualifies = bool(
+            self.ranker_margin >= self.identity_ranker_min_margin
             and candidate.visible_streak >= 5
             and candidate.motion_reliability >= 0.10
-            and not self._leaving_frame(candidate)
             and (
                 current_track is None
                 or not self.multi_hypothesis_identity_enabled
                 or self._identity_paths_allow_switch(current_track, candidate)
             )
         )
-        if not qualifies:
-            self.ranker_candidate_id = None
-            self.ranker_candidate_streak = 0
-            return None
-        if self.ranker_candidate_id == best_id:
-            self.ranker_candidate_streak += 1
+        if legacy_qualifies:
+            if self.state_aware_legacy_candidate_id == best_id:
+                self.state_aware_legacy_candidate_streak += 1
+            else:
+                self.state_aware_legacy_candidate_id = int(best_id)
+                self.state_aware_legacy_candidate_streak = 1
         else:
-            self.ranker_candidate_id = best_id
-            self.ranker_candidate_streak = 1
-        votes_needed = (
+            self.state_aware_legacy_candidate_id = None
+            self.state_aware_legacy_candidate_streak = 0
+        legacy_votes_needed = (
             _RANKER_RECOVERY_VOTES
             if current_track is None
             or current_track.lost_frames > _REAL_COAST_GRACE
             or current_track.predicted_only
             else _RANKER_SWITCH_VOTES
         )
-        return (
-            candidate
-            if self.ranker_candidate_streak >= votes_needed
-            else None
+        legacy_approved = bool(
+            legacy_qualifies
+            and self.state_aware_legacy_candidate_streak >= legacy_votes_needed
         )
+        event.update(
+            {
+                "path_support": float(path_support),
+                "ranker_evidence_after": float(evidence),
+                "recovery": int(recovery),
+                "short_coast": int(short_coast),
+                "current_suspicious": int(current_suspicious),
+                "threshold": float(threshold),
+                "proposed": int(evidence >= threshold),
+                "legacy_qualifies": int(legacy_qualifies),
+                "legacy_streak": int(self.state_aware_legacy_candidate_streak),
+                "legacy_approved": int(legacy_approved),
+                "recent_rollback": int(recent_rollback),
+            }
+        )
+        if self.switch_event_model is not None:
+            self.switch_event_probability = float(
+                self.switch_event_model.predict_probability(event)
+            )
+            model_approved = bool(
+                evidence >= threshold
+                and self.switch_event_probability
+                >= self.switch_event_model.min_probability
+                and (
+                    recovery
+                    or self.ranker_switch_delta
+                    >= _SWITCH_EVENT_VISIBLE_MIN_DELTA
+                )
+            )
+            # The learned gate can approve an earlier State-aware recovery,
+            # but vetoing it must not remove a switch that the conservative
+            # production rule would eventually have made.
+            self.switch_event_approved = bool(model_approved or legacy_approved)
+            event["switch_event_probability"] = self.switch_event_probability
+            event["switch_event_model_approved"] = int(model_approved)
+            event["switch_event_approved"] = int(self.switch_event_approved)
+        else:
+            self.switch_event_approved = bool(evidence >= threshold)
+        self.switch_event = event
+        if self.switch_event_approved:
+            self.state_aware_legacy_candidate_id = None
+            self.state_aware_legacy_candidate_streak = 0
+            return candidate
+        return None
+
+    def _update_identity_confidence(
+        self,
+        target: Optional[_ShapeTrack],
+        *,
+        position_actionable: bool,
+    ) -> None:
+        """Update the experimental identity safety state.
+
+        This is deliberately independent from Kalman position confidence.  A
+        visible, stable BG track can be position-confident while its REAL
+        identity is unsafe.
+        """
+        previous_safe = self.identity_safe
+        if target is None:
+            self.identity_confidence = 0.0
+            self.identity_state = "uninitialized" if not self.white_seen else "lost"
+            self.identity_safe = False
+            self.hold_reason = "no_target"
+            return
+        if self.white_active:
+            self.identity_confidence = 1.0
+            self.identity_state = "seed"
+            self.identity_safe = bool(position_actionable)
+            self.hold_reason = None if self.identity_safe else "position_uncertain"
+            return
+        if not self.white_seen:
+            self.identity_confidence = 0.0
+            self.identity_state = "uninitialized"
+            self.identity_safe = False
+            self.hold_reason = "no_white_seed"
+            return
+
+        if self.identity_switched:
+            # One observation frame is enough to reject an immediately bad
+            # hand-off without suppressing several known-good pointer frames.
+            self.identity_probation_frames = max(self.identity_probation_frames, 1)
+        if target.predicted_only:
+            self.identity_confidence = float(
+                np.clip(0.55 * math.exp(-0.25 * target.lost_frames), 0.0, 1.0)
+            )
+            # Short coast intervals are common even on stable clips. Preserve
+            # the previously established identity for a bounded interval; the
+            # existing Kalman uncertainty gate remains independently active.
+            self.identity_safe = bool(
+                position_actionable
+                and previous_safe
+                and target.lost_frames <= _IDENTITY_SAFETY_COAST_GRACE
+            )
+            self.identity_state = "coasting" if self.identity_safe else "lost"
+            self.hold_reason = None if self.identity_safe else "target_predicted"
+            return
+
+        if self.identity_probation_frames > 0:
+            self.identity_probation_frames -= 1
+            self.identity_confidence = 0.55
+            self.identity_state = "probation"
+            self.identity_safe = False
+            self.hold_reason = "switch_probation"
+            return
+
+        if self.ranker_top_id is None:
+            self.identity_ranker_unavailable_frames += 1
+            self.identity_confidence = 0.45
+            self.identity_state = "suspect"
+            self.identity_safe = bool(
+                position_actionable
+                and previous_safe
+                and self.identity_ranker_unavailable_frames <= 3
+            )
+            self.hold_reason = (
+                None if self.identity_safe else "ranker_unavailable"
+            )
+            return
+        self.identity_ranker_unavailable_frames = 0
+
+        if self.ranker_top_id == target.id:
+            gap_term = 0.16 * math.tanh(max(0.0, self.ranker_margin) / 2.0)
+            streak_term = 0.14 * min(1.0, self.identity_match_streak / 4.0)
+            self.identity_confidence = float(
+                np.clip(0.58 + gap_term + streak_term, 0.0, 1.0)
+            )
+            self.identity_state = "locked"
+            enter_safe = self.identity_match_streak >= 1
+            keep_safe = previous_safe and self.identity_confidence >= 0.55
+            self.identity_safe = bool(position_actionable and (enter_safe or keep_safe))
+            self.hold_reason = None if self.identity_safe else "identity_warming"
+            return
+
+        self.identity_confidence = float(
+            np.clip(
+                0.70
+                - 0.12 * min(self.identity_mismatch_streak, 4)
+                - 0.08 * math.tanh(max(0.0, self.ranker_switch_delta) / 2.0),
+                0.05,
+                0.60,
+            )
+        )
+        self.identity_state = "suspect"
+        self.identity_safe = bool(
+            position_actionable
+            and previous_safe
+            and self.identity_mismatch_streak < 2
+            and self.identity_confidence >= 0.45
+        )
+        self.hold_reason = None if self.identity_safe else "ranker_disagrees"
 
     def _assign_roles(self, gray: Optional[np.ndarray] = None) -> bool:
         """Label REAL from four-cue scores after white fade."""
@@ -2199,6 +2712,13 @@ class LieDetectorTracker:
                     >= current_appearance_error + 0.015
                 )
             if not recovery_protects_current:
+                previous_target_id = self.target_id
+                is_recent_rollback = bool(
+                    ranker_candidate.id
+                    == self.recent_ranker_switch_previous_id
+                    and self.recent_ranker_switch_age
+                    <= _SWITCH_EVENT_ROLLBACK_WINDOW
+                )
                 self.target_id = ranker_candidate.id
                 self.last_outlier_real_xy = ranker_candidate.state[:2]
                 self.ranker_candidate_id = None
@@ -2210,6 +2730,15 @@ class LieDetectorTracker:
                 self.challenger_evidence.clear()
                 self.shadow_candidate_id = None
                 self.shadow_candidate_votes.clear()
+                if self.switch_event_model is None:
+                    self.recent_ranker_switch_previous_id = None
+                    self.recent_ranker_switch_age = 0
+                elif is_recent_rollback:
+                    self.recent_ranker_switch_previous_id = None
+                    self.recent_ranker_switch_age = 0
+                else:
+                    self.recent_ranker_switch_previous_id = previous_target_id
+                    self.recent_ranker_switch_age = 0
                 _apply_roles()
                 return True
             self.ranker_candidate_id = None
@@ -2546,6 +3075,17 @@ class LieDetectorTracker:
         self.identity_switched = False
         self.stale_recovery_committed = False
         self.ranker_switched = False
+        self.switch_event = None
+        self.switch_event_probability = 0.0
+        self.switch_event_approved = False
+        if self.recent_ranker_switch_previous_id is not None:
+            self.recent_ranker_switch_age += 1
+            if (
+                self.recent_ranker_switch_age
+                > _SWITCH_EVENT_ROLLBACK_WINDOW
+            ):
+                self.recent_ranker_switch_previous_id = None
+                self.recent_ranker_switch_age = 0
 
         bright = self._initial_bright_shape(gray, hsv)
         bright_valid = (
@@ -2656,6 +3196,9 @@ class LieDetectorTracker:
         ]
 
         if target is None:
+            self._update_identity_confidence(
+                None, position_actionable=False
+            )
             return LieDetectorTrackingResult(
                 acquired=False,
                 target_id=self.target_id,
@@ -2681,6 +3224,20 @@ class LieDetectorTracker:
                 ranker_candidate_id=self.ranker_candidate_id,
                 ranker_margin=self.ranker_margin,
                 ranker_switched=self.ranker_switched,
+                ranker_top_id=self.ranker_top_id,
+                ranker_current_rank=self.ranker_current_rank,
+                ranker_current_score=self.ranker_current_score,
+                ranker_switch_delta=self.ranker_switch_delta,
+                ranker_evidence=self.ranker_evidence,
+                motion_corroborated=self.motion_corroborated,
+                identity_confidence=self.identity_confidence,
+                identity_state=self.identity_state,
+                identity_safe=self.identity_safe,
+                hold_reason=self.hold_reason,
+                position_actionable=False,
+                switch_event=self.switch_event,
+                switch_event_probability=self.switch_event_probability,
+                switch_event_approved=self.switch_event_approved,
                 constellation=constellation,
             )
 
@@ -2692,9 +3249,16 @@ class LieDetectorTracker:
             )
         confidence = min(1.0, target.hits / 5.0) * math.exp(-0.15 * target.lost_frames)
         uncertainty = target.position_uncertainty
-        actionable = (
+        position_actionable = (
             not target.predicted_only
             or 4.0 * uncertainty <= max(8.0, float(radius))
+        )
+        self._update_identity_confidence(
+            target, position_actionable=position_actionable
+        )
+        actionable = bool(
+            position_actionable
+            and (not self.identity_safety_enabled or self.identity_safe)
         )
         return LieDetectorTrackingResult(
             acquired=True,
@@ -2724,5 +3288,19 @@ class LieDetectorTracker:
             ranker_candidate_id=self.ranker_candidate_id,
             ranker_margin=self.ranker_margin,
             ranker_switched=self.ranker_switched,
+            ranker_top_id=self.ranker_top_id,
+            ranker_current_rank=self.ranker_current_rank,
+            ranker_current_score=self.ranker_current_score,
+            ranker_switch_delta=self.ranker_switch_delta,
+            ranker_evidence=self.ranker_evidence,
+            motion_corroborated=self.motion_corroborated,
+            identity_confidence=self.identity_confidence,
+            identity_state=self.identity_state,
+            identity_safe=self.identity_safe,
+            hold_reason=self.hold_reason,
+            position_actionable=position_actionable,
+            switch_event=self.switch_event,
+            switch_event_probability=self.switch_event_probability,
+            switch_event_approved=self.switch_event_approved,
             constellation=constellation,
         )

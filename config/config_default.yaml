@@ -441,6 +441,15 @@ lie_detector:
   # ranker only proposes a switch after several consecutive high-margin votes.
   identity_ranker_model: "models/lie_identity_ranker.txt"
   identity_ranker_min_margin: 2.00
+  # Identity safety and motion corroboration remain optional. The validated
+  # State-aware + switch-event decision path is enabled by default; see
+  # log/lie_switch_event_20260912/REPORT.md.
+  identity_safety: false
+  state_aware_ranker: true
+  motion_corroboration_model: ""
+  # Conservative gate on State-aware switch proposals.
+  switch_event_model: "models/lie_switch_event_model.txt"
+  switch_event_min_probability: 0.45
   # Panel presence is proven by matching the 谎言探测仪 title text; the ROI
   # estimator alone also fires on ordinary gameplay frames.
   title_template: "misc/lie_detector_title_cn.png"

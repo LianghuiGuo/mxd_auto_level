@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import sys
 import unittest
+from types import SimpleNamespace
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -20,6 +23,11 @@ from src.engine.LieIdentityRanker import (  # noqa: E402
     aggregate_history,
     extract_similarity_features,
     extract_frame_features,
+)
+from src.engine.LieSwitchEventModel import (  # noqa: E402
+    SWITCH_EVENT_FEATURE_NAMES,
+    SwitchEventModel,
+    build_switch_event_features,
 )
 
 MODEL_PATH = PROJECT_ROOT / "models" / "lie_identity_ranker.txt"
@@ -76,6 +84,52 @@ class LightGbmTextModelTest(unittest.TestCase):
             vector = [float(row[name]) for name in model.feature_names]
             expected = float(booster.predict([vector])[0])
             self.assertAlmostEqual(model.predict(vector), expected, places=6)
+
+
+class SwitchEventModelTest(unittest.TestCase):
+    def test_feature_builder_has_complete_finite_schema(self) -> None:
+        event = {
+            "ranker_switch_delta": 3.0,
+            "ranker_current_rank": 2,
+            "candidate_count": 15,
+            "current_radius_norm": 0.10,
+            "challenger_radius_norm": 0.13,
+        }
+        features = build_switch_event_features(event)
+
+        self.assertEqual(set(features), set(SWITCH_EVENT_FEATURE_NAMES))
+        self.assertAlmostEqual(features["delta_radius_norm"], 0.03)
+        self.assertTrue(all(np.isfinite(value) for value in features.values()))
+
+    def test_portable_switch_model_matches_lightgbm_probability(self) -> None:
+        model_path = PROJECT_ROOT / "models" / "lie_switch_event_model.txt"
+        if not model_path.is_file():
+            self.skipTest("switch-event model has not been trained")
+        try:
+            import lightgbm as lgb
+        except (ImportError, OSError):  # pragma: no cover
+            self.skipTest("lightgbm runtime unavailable")
+        portable = SwitchEventModel(model_path)
+        native = lgb.Booster(model_file=str(model_path))
+        event = {
+            "ranker_switch_delta": 2.4,
+            "ranker_top_margin": 2.1,
+            "ranker_current_rank": 3,
+            "candidate_count": 14,
+            "ranker_disagreement_streak": 4,
+            "ranker_evidence_after": 3.0,
+            "path_support": 1.0,
+            "current_visible_streak_norm": 0.8,
+            "challenger_visible_streak_norm": 0.4,
+        }
+        features = build_switch_event_features(event)
+        vector = [features[name] for name in portable.model.feature_names]
+
+        self.assertAlmostEqual(
+            portable.predict_probability(event),
+            float(native.predict([vector])[0]),
+            places=6,
+        )
 
 
 class FeatureAndHistoryTest(unittest.TestCase):
@@ -140,6 +194,14 @@ class RankerVotingTest(unittest.TestCase):
         tracker.ranker_candidate_id = None
         tracker.ranker_candidate_streak = 0
         tracker.ranker_margin = 0.0
+        tracker.ranker_top_id = None
+        tracker.ranker_current_rank = 0
+        tracker.ranker_current_score = 0.0
+        tracker.ranker_switch_delta = 0.0
+        tracker.ranker_evidence = 0.0
+        tracker.motion_corroborated = False
+        tracker.state_aware_ranker_enabled = False
+        tracker.motion_corroboration_ranker = None
 
         @dataclass
         class _Track:
@@ -164,6 +226,65 @@ class RankerVotingTest(unittest.TestCase):
         self.assertTrue(all(result is None for result in results[:4]))
         self.assertIsNotNone(results[4])
         self.assertEqual(results[4].id, 2)
+
+
+class IdentitySafetyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        import src.engine.LieDetectorTracker as tracker_mod
+
+        self.tracker_mod = tracker_mod
+        self.tracker = object.__new__(tracker_mod.LieDetectorTracker)
+        self.tracker.white_seen = True
+        self.tracker.white_active = False
+        self.tracker.identity_switched = False
+        self.tracker.identity_confidence = 0.0
+        self.tracker.identity_state = "uninitialized"
+        self.tracker.identity_safe = False
+        self.tracker.identity_match_streak = 0
+        self.tracker.identity_mismatch_streak = 0
+        self.tracker.identity_ranker_unavailable_frames = 0
+        self.tracker.identity_probation_frames = 0
+        self.tracker.ranker_top_id = 1
+        self.tracker.ranker_margin = 2.0
+        self.tracker.ranker_switch_delta = 0.0
+
+    def update(self, target, position_actionable=True) -> None:
+        self.tracker_mod.LieDetectorTracker._update_identity_confidence(
+            self.tracker, target, position_actionable=position_actionable
+        )
+
+    def test_holds_after_two_ranker_disagreements(self) -> None:
+        target = SimpleNamespace(id=1, predicted_only=False, lost_frames=0)
+        self.tracker.identity_safe = True
+        self.tracker.ranker_top_id = 2
+        self.tracker.ranker_switch_delta = 1.0
+
+        self.tracker.identity_mismatch_streak = 1
+        self.update(target)
+        self.assertTrue(self.tracker.identity_safe)
+
+        self.tracker.identity_mismatch_streak = 2
+        self.update(target)
+        self.assertFalse(self.tracker.identity_safe)
+        self.assertEqual(self.tracker.hold_reason, "ranker_disagrees")
+
+    def test_bounded_coast_requires_prior_identity_lock(self) -> None:
+        target = SimpleNamespace(id=1, predicted_only=True, lost_frames=1)
+        self.tracker.identity_safe = True
+        self.update(target)
+        self.assertTrue(self.tracker.identity_safe)
+        self.assertEqual(self.tracker.identity_state, "coasting")
+
+        target.lost_frames = self.tracker_mod._IDENTITY_SAFETY_COAST_GRACE + 1
+        self.update(target)
+        self.assertFalse(self.tracker.identity_safe)
+        self.assertEqual(self.tracker.hold_reason, "target_predicted")
+
+    def test_position_uncertainty_always_holds(self) -> None:
+        target = SimpleNamespace(id=1, predicted_only=False, lost_frames=0)
+        self.tracker.identity_match_streak = 4
+        self.update(target, position_actionable=False)
+        self.assertFalse(self.tracker.identity_safe)
 
 
 if __name__ == "__main__":  # pragma: no cover
