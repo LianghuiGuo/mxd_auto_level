@@ -21,10 +21,20 @@ class GameWindowCapturor:
     def __init__(self, cfg, test_image_name = None):
         self.cfg = cfg
         self.frame = None
+        self.frame_sequence = 0
+        self.frame_captured_at = 0.0
+        self._static_test_frame = test_image_name is not None
         self.lock = threading.Lock()
         self.is_terminated = False
         self.fps = 0
-        self.fps_limit = cfg["system"]["fps_limit_window_capturor"]
+        configured_fps = float(cfg["system"]["fps_limit_window_capturor"])
+        lie_cfg = cfg.get("lie_detector", {})
+        lie_fps = (
+            float(lie_cfg.get("processing_fps", 33.0))
+            if bool(lie_cfg.get("enabled", True))
+            else 0.0
+        )
+        self.fps_limit = max(configured_fps, lie_fps)
         self.t_last_run = 0.0
         self.capture_control = None
         self.window_title = ""
@@ -32,6 +42,7 @@ class GameWindowCapturor:
         # If use test image as input, disable the whole capture thread
         if test_image_name is not None:
             self.frame = load_image(f"test/{test_image_name}.png")
+            self.frame_captured_at = time.monotonic()
             return
 
         # Build a priority-ordered list of window-title search keywords.
@@ -108,6 +119,8 @@ class GameWindowCapturor:
         '''
         with self.lock:
             self.frame = frame.frame_buffer
+            self.frame_sequence += 1
+            self.frame_captured_at = time.monotonic()
         self.limit_fps()
 
     def on_closed(self):
@@ -124,7 +137,32 @@ class GameWindowCapturor:
         with self.lock:
             if self.frame is None:
                 return None
-            return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+            if self.frame.ndim == 3 and self.frame.shape[2] == 4:
+                return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+            return self.frame.copy()
+
+    def get_frame_snapshot(self, after_sequence=None):
+        """Return ``(sequence, BGR frame, monotonic timestamp)`` atomically."""
+        with self.lock:
+            if self.frame is None:
+                return None
+            if self._static_test_frame:
+                self.frame_sequence += 1
+                self.frame_captured_at = time.monotonic()
+            elif (
+                after_sequence is not None
+                and self.frame_sequence == after_sequence
+            ):
+                return None
+            sequence = self.frame_sequence
+            captured_at = self.frame_captured_at
+            raw = self.frame.copy()
+        frame = (
+            cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+            if raw.ndim == 3 and raw.shape[2] == 4
+            else raw
+        )
+        return sequence, frame, captured_at
 
     def stop(self):
         '''

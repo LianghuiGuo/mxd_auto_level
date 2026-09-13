@@ -39,6 +39,7 @@ from src.engine.HealthMonitor import HealthMonitor
 from src.engine.Profiler import Profiler
 from src.engine.RuneSolver import RuneSolver
 from src.engine.LieDetectorRuntime import LieDetectorRuntime
+from src.engine.LieDetectorWorker import LieDetectorWorker
 from src.utils.LieAlert import LocalSoundAlert
 from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.states.hunting import HuntingState
@@ -152,6 +153,7 @@ class MapleStoryAutoBot:
         self.profiler = None # Profiler, for performance issue debugging
         self.rune_solver = None # Rune solver
         self.lie_detector_runtime = None
+        self.lie_detector_worker = None
         self.lie_sound_alert = None
         self._lie_last_pointer_target = None
         self._lie_jump_reject_streak = 0
@@ -288,6 +290,8 @@ class MapleStoryAutoBot:
         lie_cfg.setdefault("title_match_threshold", 0.70)
         lie_cfg.setdefault("panel_confirm_frames", 2)
         lie_cfg.setdefault("panel_miss_frames", 3)
+        lie_cfg.setdefault("roi_lock_samples", 3)
+        lie_cfg.setdefault("processing_fps", 33)
         lie_cfg.setdefault("max_pointer_jump", 160)
         lie_cfg.setdefault("confirm_wait_seconds", 12.0)
         lie_cfg.setdefault("confirm_click_interval", 0.8)
@@ -510,7 +514,12 @@ class MapleStoryAutoBot:
                 pass
 
         self.lie_detector_runtime = None
+        self.lie_detector_worker = None
         self.lie_sound_alert = None
+        self._lie_last_pointer_target = None
+        self._lie_pending_pointer_target = None
+        self._lie_jump_reject_streak = 0
+        self._lie_active_logged = False
         if bool(self.cfg.get("lie_detector", {}).get("enabled", True)):
             try:
                 alert_cfg = self.cfg["lie_detector"].get("alert", {})
@@ -529,8 +538,22 @@ class MapleStoryAutoBot:
                     self.cfg["lie_detector"]
                 )
                 self.lie_detector_runtime.warm_up()
-                logger.info("[Lie Detector] Mouse-follow runtime ready.")
+                self.lie_detector_worker = LieDetectorWorker(
+                    self._lie_worker_frame_source,
+                    self.lie_detector_runtime.update,
+                    target_fps=float(
+                        self.cfg["lie_detector"].get("processing_fps", 33)
+                    ),
+                    on_result=self._on_lie_worker_result,
+                )
+                self.lie_detector_worker.start()
+                logger.info(
+                    "[Lie Detector] Mouse-follow runtime ready on dedicated worker."
+                )
             except Exception as exc:
+                if self.lie_detector_worker is not None:
+                    self.lie_detector_worker.stop()
+                self.lie_detector_worker = None
                 self.lie_detector_runtime = None
                 logger.error(
                     "[Lie Detector] Disabled because initialization failed: "
@@ -3071,6 +3094,11 @@ class MapleStoryAutoBot:
         # expected to resume with the bot.
         if finalize_recording:
             self.stop_record()
+        # Stop the detector before closing its capture source. This also waits
+        # for any in-flight tracker update / mouse callback to finish.
+        if self.lie_detector_worker is not None:
+            self.lie_detector_worker.stop()
+            self.lie_detector_worker = None
         # Terminate keyboard controller
         if self.kb is not None:
             self.kb.is_terminated = True
@@ -3799,6 +3827,85 @@ class MapleStoryAutoBot:
             return None, 0
         return content, title_h
 
+    def _lie_worker_frame_source(self, after_sequence=None):
+        """Return each new raw capture exactly once, cropped past the title."""
+        capture = self.capture
+        if capture is None:
+            return None
+        snapshot_getter = getattr(capture, "get_frame_snapshot", None)
+        if snapshot_getter is None:
+            return None
+        snapshot = snapshot_getter(after_sequence)
+        if snapshot is None:
+            return None
+        sequence, frame, captured_at = snapshot
+        title_h = int(self.cfg["game_window"].get("title_bar_height", 0))
+        content = frame[title_h:, :]
+        if content.size == 0:
+            return None
+        return int(sequence), content, float(captured_at)
+
+    def _on_lie_worker_result(self, snapshot):
+        """Execute latency-sensitive alert/cursor actions on worker results."""
+        result = snapshot.value
+        if result.panel_just_confirmed and self.lie_sound_alert is not None:
+            if self.lie_sound_alert.notify():
+                logger.warning(
+                    "[Lie Detector] Challenge confirmed; local sound alert scheduled."
+                )
+
+        title_h = int(self.cfg["game_window"].get("title_bar_height", 0))
+        if result.confirm_click is not None:
+            window_coord = self._lie_target_to_window_coord(
+                result.confirm_click, title_h
+            )
+            logger.info(
+                f"[Lie Detector] Clicking 确认 at frame "
+                f"{tuple(round(v) for v in result.confirm_click)} "
+                f"(window {window_coord})."
+            )
+            if not self.is_disable_control:
+                click_in_game_window(self.capture.window_title, window_coord)
+            return
+
+        target = result.target_frame
+        if target is not None:
+            max_jump = float(
+                self.cfg["lie_detector"].get("max_pointer_jump", 160)
+            )
+            previous = self._lie_last_pointer_target
+            if previous is not None:
+                jump = float(np.hypot(
+                    target[0] - previous[0], target[1] - previous[1]
+                ))
+                if jump > max_jump:
+                    pending = getattr(
+                        self, "_lie_pending_pointer_target", None
+                    )
+                    if pending is not None and np.hypot(
+                        target[0] - pending[0], target[1] - pending[1]
+                    ) <= 30.0:
+                        self._lie_jump_reject_streak += 1
+                    else:
+                        self._lie_pending_pointer_target = target
+                        self._lie_jump_reject_streak = 1
+                    if self._lie_jump_reject_streak < 2:
+                        target = None
+            if target is not None:
+                window_coord = self._lie_target_to_window_coord(target, title_h)
+                if not self.is_disable_control:
+                    move_mouse_in_game_window(
+                        self.capture.window_title, window_coord
+                    )
+                self._lie_last_pointer_target = target
+                self._lie_pending_pointer_target = None
+                self._lie_jump_reject_streak = 0
+
+        if not result.engaged:
+            self._lie_last_pointer_target = None
+            self._lie_pending_pointer_target = None
+            self._lie_jump_reject_streak = 0
+
     def _lie_target_to_window_coord(self, target, title_h):
         """Content-frame pixel -> window pixel (title bar included)."""
         return (
@@ -3836,25 +3943,19 @@ class MapleStoryAutoBot:
         )
 
     def _handle_lie_detector(self):
-        runtime = self.lie_detector_runtime
-        if runtime is None:
+        worker = self.lie_detector_worker
+        if worker is None:
             return False
-
-        content, title_h = self._lie_content_frame()
-        if content is None:
+        snapshot = worker.latest()
+        if snapshot is None:
             return False
-
-        result = runtime.update(content, time.monotonic())
-        runtime.draw_debug(
-            self.img_frame_debug,
-            self._lie_scale_result_for_debug(result, content),
-        )
-        if result.panel_just_confirmed and self.lie_sound_alert is not None:
-            if self.lie_sound_alert.notify():
-                logger.warning(
-                    "[Lie Detector] Challenge confirmed; local sound alert "
-                    "scheduled."
-                )
+        result = snapshot.value
+        content, _title_h = self._lie_content_frame()
+        if content is not None:
+            self.lie_detector_runtime.draw_debug(
+                self.img_frame_debug,
+                self._lie_scale_result_for_debug(result, content),
+            )
         if not result.engaged:
             if self._lie_active_logged:
                 self.kb.automation_suspended = bool(
@@ -3868,9 +3969,6 @@ class MapleStoryAutoBot:
                     "resumed."
                 )
             self._lie_active_logged = False
-            self._lie_last_pointer_target = None
-            self._lie_pending_pointer_target = None
-            self._lie_jump_reject_streak = 0
             return False
 
         if not self._lie_active_logged:
@@ -3895,55 +3993,6 @@ class MapleStoryAutoBot:
         self.kb.set_command("none none none")
         self.kb.release_all_key()
         self.kb.automation_suspended = True
-
-        # The success dialog blocks the character until 确认 is pressed, so it
-        # is handled before (and instead of) any pointer following.
-        if result.confirm_click is not None:
-            window_coord = self._lie_target_to_window_coord(
-                result.confirm_click, title_h
-            )
-            logger.info(
-                f"[Lie Detector] Clicking 确认 at frame "
-                f"{tuple(round(v) for v in result.confirm_click)} "
-                f"(window {window_coord})."
-            )
-            if not self.is_disable_control:
-                click_in_game_window(self.capture.window_title, window_coord)
-            return True
-
-        target = result.target_frame
-        if target is not None:
-            max_jump = float(
-                self.cfg["lie_detector"].get("max_pointer_jump", 160)
-            )
-            previous = self._lie_last_pointer_target
-            if previous is not None:
-                jump = float(np.hypot(
-                    target[0] - previous[0], target[1] - previous[1]
-                ))
-                if jump > max_jump:
-                    pending = getattr(
-                        self, "_lie_pending_pointer_target", None
-                    )
-                    if pending is not None and np.hypot(
-                        target[0] - pending[0], target[1] - pending[1]
-                    ) <= 30.0:
-                        self._lie_jump_reject_streak += 1
-                    else:
-                        self._lie_pending_pointer_target = target
-                        self._lie_jump_reject_streak = 1
-                    if self._lie_jump_reject_streak < 2:
-                        target = None
-            if target is not None:
-                window_coord = self._lie_target_to_window_coord(
-                    target, title_h
-                )
-                move_mouse_in_game_window(
-                    self.capture.window_title, window_coord
-                )
-                self._lie_last_pointer_target = target
-                self._lie_pending_pointer_target = None
-                self._lie_jump_reject_streak = 0
 
         return True
 

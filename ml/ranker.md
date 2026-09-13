@@ -33,9 +33,13 @@ lie_detector:
   motion_corroboration_model: ""
   switch_event_model: "models/lie_switch_event_model.txt"
   switch_event_min_probability: 0.45
+  processing_fps: 33
+  roi_lock_samples: 3
 ```
 
-运行时由 `src/engine/LieDetectorRuntime.py` 读取上述配置、加载检测器和 ranker，并创建 `LieDetectorTracker`。
+运行时由 `src/engine/LieDetectorRuntime.py` 读取上述配置、加载检测器和 ranker，并创建 `LieDetectorTracker`。测谎检测和鼠标跟随运行在独立线程中，不再受主挂机循环的 `fps_limit_main: 10` 限制；截图线程会自动提升到至少 `processing_fps`。实际吞吐仍取决于 YOLO 推理耗时，运行日志会在低于目标时报告单帧耗时。
+
+面板出现后，运行时会收集前 `roi_lock_samples` 个有效 ROI，取中位数并锁定，直到当前测谎面板关闭。锁定前暂停挂机但不初始化轨迹，从而避免动态裁剪坐标变化污染速度、旋转和身份历史。
 
 ## 日常使用
 
@@ -68,14 +72,15 @@ python3 -m src.engine.MapleStoryAutoLevelUp --cfg cleric
 检测到“谎言探测仪”窗口后，程序会：
 
 1. 连续确认测谎面板确实存在。
-2. 暂停正常的键盘挂机操作。
-3. 使用 YOLO 检测当前画面中的所有候选图形。
-4. 由 tracker 对候选进行跨帧关联并维护身份轨迹。
-5. 由 ranker 根据每条候选轨迹的历史特征进行评分。
-6. 只有新候选连续多帧领先，且与第二名的分差达到 `2.0`，才允许切换目标。
-7. 只在目标位置可信且可操作时移动鼠标。
-8. 面板结束后自动寻找并点击“确认”。
-9. 恢复正常挂机。
+2. 收集前3个有效面板 ROI，取中位数并锁定。
+3. 暂停正常的键盘挂机操作。
+4. 在独立33 FPS目标线程中使用 YOLO 检测当前画面中的所有候选图形。
+5. 由 tracker 对候选进行跨帧关联并维护身份轨迹。
+6. 由 ranker 根据每条候选轨迹的历史特征进行评分。
+7. 只有新候选连续多帧领先，且与第二名的分差达到 `2.0`，才允许切换目标。
+8. 只在目标位置可信且可操作时移动鼠标。
+9. 面板结束后自动寻找并点击“确认”。
+10. 恢复正常挂机。
 
 Ranker 并不会在每一帧直接强制覆盖 tracker。它提供的是带有 margin 和连续投票保护的身份切换信号。
 
@@ -122,7 +127,9 @@ switch-event 模型只门控 State-aware 的提前切换。若模型否决，正
 正常初始化后会输出：
 
 ```text
-[Lie Detector] Mouse-follow runtime ready.
+[Lie Detector] Dedicated worker started; target=33.0 FPS.
+[Lie Detector] Mouse-follow runtime ready on dedicated worker.
+[Lie Detector] Panel ROI locked from 3 samples: (...).
 ```
 
 如果模型文件缺失、模型加载失败或初始化过程中出现其他异常，会输出：

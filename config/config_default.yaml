@@ -463,6 +463,12 @@ lie_detector:
   title_match_threshold: 0.70
   panel_confirm_frames: 2
   panel_miss_frames: 3
+  # Sample the first few valid panel boxes, lock their median ROI, and keep it
+  # fixed until the panel closes so tracker coordinates cannot jump per frame.
+  roi_lock_samples: 3
+  # Dedicated capture/tracking worker target. Actual throughput is reported in
+  # logs and still depends on detector latency and available CPU/GPU.
+  processing_fps: 33
   max_pointer_jump: 160
   # Play one non-blocking local alert after the title has been confirmed for
   # panel_confirm_frames consecutive frames. Empty sound_file uses the OS

@@ -251,6 +251,10 @@ class LieDetectorRuntime:
         self.confirm_detector = confirm_detector
         self.confirm_frames = max(1, int(config.get("panel_confirm_frames", 2)))
         self.miss_frames = max(1, int(config.get("panel_miss_frames", 3)))
+        # A moving crop changes every track's local coordinate system. Gather
+        # a few early chrome detections and then keep their median ROI fixed
+        # for the entire challenge. Tracking starts only after the lock.
+        self.roi_lock_samples = max(1, int(config.get("roi_lock_samples", 3)))
         self.confirm_wait_seconds = float(
             config.get("confirm_wait_seconds", 12.0)
         )
@@ -278,6 +282,8 @@ class LieDetectorRuntime:
         self._miss_streak = 0
         self._panel_confirmed = False
         self._roi: Optional[tuple[int, int, int, int]] = None
+        self._roi_samples: list[tuple[int, int, int, int]] = []
+        self._roi_locked = False
         self._confirm_deadline = 0.0
         self._confirm_clicks = 0
         # Sentinel so the very first sighting of the dialog clicks at once
@@ -401,12 +407,26 @@ class LieDetectorRuntime:
         if panel_just_confirmed:
             self._panel_confirmed = True
 
-        roi = self.roi_detector(frame_bgr)
-        if roi is not None and self._valid_roi(roi, frame_bgr):
-            self._roi = roi
+        if not self._roi_locked:
+            roi = self.roi_detector(frame_bgr)
+            if roi is not None and self._valid_roi(roi, frame_bgr):
+                self._roi_samples.append(tuple(int(value) for value in roi))
+            if len(self._roi_samples) >= self.roi_lock_samples:
+                samples = np.asarray(self._roi_samples, dtype=np.float64)
+                locked = tuple(
+                    int(round(value)) for value in np.median(samples, axis=0)
+                )
+                if self._valid_roi(locked, frame_bgr):
+                    self._roi = locked
+                    self._roi_locked = True
+                    logger.info(
+                        "[Lie Detector] Panel ROI locked from "
+                        f"{len(self._roi_samples)} samples: {locked}."
+                    )
         if self._roi is None:
-            # Panel proven present but ROI not resolved yet: still pause the
-            # bot, just don't touch the pointer.
+            # Panel proven present but ROI is still being stabilised: pause
+            # the bot, but do not initialise tracks in a moving coordinate
+            # system or touch the pointer.
             return LieDetectorRuntimeResult(
                 engaged=True,
                 phase=PHASE_PANEL,
@@ -442,6 +462,8 @@ class LieDetectorRuntime:
         self._reset_tracker()
         self.phase = PHASE_CONFIRM
         self._roi = None
+        self._roi_samples = []
+        self._roi_locked = False
         self._seen_streak = 0
         self._miss_streak = 0
         self._confirm_deadline = timestamp + self.confirm_wait_seconds

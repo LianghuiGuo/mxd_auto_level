@@ -101,7 +101,13 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.roi = (300, 120, 600, 420)
 
     def _runtime(self, presence, *, tracker=None, confirm=None, **config):
-        settings = {"panel_confirm_frames": 2, "panel_miss_frames": 3}
+        settings = {
+            "panel_confirm_frames": 2,
+            "panel_miss_frames": 3,
+            # Existing tests focus on panel/confirm semantics. Dedicated ROI
+            # locking behaviour is exercised separately below.
+            "roi_lock_samples": 1,
+        }
         settings.update(config)
         return LieDetectorRuntime(
             settings,
@@ -182,6 +188,42 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertTrue(result.engaged)
         self.assertIsNone(result.target_frame)
 
+    def test_roi_is_median_locked_before_tracking_and_then_stays_fixed(self):
+        rois = iter(
+            [
+                (300, 100, 600, 420),
+                (304, 122, 596, 399),
+                (302, 104, 598, 418),
+                # Must be ignored after the first three samples lock.
+                (360, 180, 520, 340),
+            ]
+        )
+        tracker = _FakeTracker()
+        runtime = LieDetectorRuntime(
+            {
+                "panel_confirm_frames": 2,
+                "panel_miss_frames": 3,
+                "roi_lock_samples": 3,
+            },
+            panel_gate=_FakeGate([True]),
+            roi_detector=lambda _frame: next(rois),
+            confirm_detector=lambda _frame: None,
+            tracker=tracker,
+        )
+
+        first = runtime.update(self.frame, 1.0)
+        second = runtime.update(self.frame, 2.0)
+        locked = runtime.update(self.frame, 3.0)
+        held = runtime.update(self.frame, 4.0)
+
+        self.assertIsNone(first.panel_roi)
+        self.assertIsNone(second.panel_roi)
+        self.assertEqual(tracker.calls, 2)
+        self.assertEqual(locked.panel_roi, (302, 104, 598, 418))
+        self.assertEqual(held.panel_roi, locked.panel_roi)
+        self.assertEqual(locked.target_frame, (332.0, 144.0))
+        self.assertEqual(held.target_frame, (332.0, 144.0))
+
     @patch("src.engine.LieDetectorRuntime.LieDetectorTracker")
     @patch("src.engine.LieDetectorRuntime.LieShapeYoloDetector")
     def test_ranker_config_is_forwarded_to_online_tracker(
@@ -243,6 +285,8 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertEqual(third.phase, PHASE_CONFIRM)
         self.assertTrue(third.engaged)
         self.assertEqual(tracker.resets, 1)
+        self.assertFalse(runtime._roi_locked)
+        self.assertEqual(runtime._roi_samples, [])
 
     def test_confirm_button_is_clicked_once_then_runtime_resumes(self):
         dialog = [(750.0, 415.0), (750.0, 415.0), None]
