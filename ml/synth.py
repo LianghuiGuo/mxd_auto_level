@@ -60,51 +60,61 @@ def scan_monster_classes():
 
 
 def _greenish_mask(bgr):
-    """Boolean mask of green-screen background pixels.
+    """Boolean mask of pixels that may be green-screen anti-aliasing.
 
     We can't rely on an EXACT (0,255,0) match: mob_maker sprites are
     anti-aliased, so the ring of pixels between the sprite and the pure-green
-    background are partially-green (e.g. (0,240,20) in BGR).  Those transition
-    pixels are only ~40% "pure green" on round sprites like slime, so exact
-    matching left a thick green halo/box around the mob in the synthetic image
-    (which taught the detector that "slime == green box" and wrecked real-game
-    recall).  Treat any pixel with a dominant green channel and low red/blue as
-    background so the whole key — including the anti-aliased fringe — is removed.
+    background are partially-green (e.g. (0,240,20) in BGR).  This intentionally
+    loose mask also matches green monster bodies, so it must NEVER be used as a
+    flood-fill domain.  ``_background_mask`` only accepts these pixels in the
+    one-pixel halo around a confirmed, exact green-screen region.
     """
     b = bgr[:, :, 0].astype(np.int16)
     g = bgr[:, :, 1].astype(np.int16)
     r = bgr[:, :, 2].astype(np.int16)
     # "greenish enough to possibly be the screen key".  Deliberately LOOSE — it
-    # matches the mob's own green body too.  We disambiguate body-vs-background
-    # by connectivity in _background_mask (only green connected to the border is
-    # background), so a loose color test here is fine and catches anti-aliasing.
+    # matches the mob's own green body too.  _background_mask therefore uses it
+    # only in a non-recursive one-pixel halo around confirmed exact-key pixels.
     return (g > 110) & (r < 130) & (b < 130) & (g - r > 40) & (g - b > 40)
 
 
 def _background_mask(bgr):
     """Boolean mask of TRUE background (green screen) pixels.
 
-    Color alone can't separate the mob's body green from the screen key — a
-    slime's body is literally (34,255,153), G fully saturated, same as the
-    screen.  What DOES separate them is connectivity: the green screen is one
-    region touching the image border, while the mob's internal green is walled
-    off by the mob's own darker outline.  So: take all "greenish" pixels, then
-    flood-fill from the border and keep only the greenish component connected to
-    the edge.  Internal green (the mob body) is preserved.
+    Seed the background only from exact ``(0, 255, 0)`` pixels connected to the
+    image border.  Then remove loose green pixels only within one pixel of that
+    confirmed background, which cleans the anti-aliased fringe without allowing
+    the loose color threshold to flood through a slime/curse-eye body.
+
+    The old implementation found connected components over the entire loose
+    green mask.  A single green or diagonally-touching pixel could therefore
+    connect the screen to a green monster and erase most of the monster.
     """
-    greenish = _greenish_mask(bgr).astype(np.uint8)
-    h, w = greenish.shape
-    # Label connected greenish regions, then keep only labels that touch the
-    # image border (that's the screen); drop labels fully inside (mob body).
-    n, labels = cv2.connectedComponents(greenish, connectivity=8)
+    exact_key = np.all(bgr == np.asarray(GREEN, dtype=bgr.dtype), axis=2)
+    h, w = exact_key.shape
+
+    # Only exact-key components touching the image border are known screen.
+    # An exact-green pixel enclosed by a monster outline is preserved.
+    _, labels = cv2.connectedComponents(exact_key.astype(np.uint8),
+                                        connectivity=8)
     border = np.concatenate([
         labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]
     ])
     border_labels = set(int(v) for v in np.unique(border) if v != 0)
     if not border_labels:
         return np.zeros((h, w), bool)
-    bg = np.isin(labels, list(border_labels))
-    return bg
+    exact_background = np.isin(labels, list(border_labels))
+
+    # Anti-aliased key colors are only trustworthy right beside confirmed
+    # screen.  Do not recursively grow through this loose mask: recursive
+    # growth is precisely what used to consume green monster bodies.
+    halo = cv2.dilate(
+        exact_background.astype(np.uint8),
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    fringe = _greenish_mask(bgr) & halo
+    return exact_background | fringe
 
 
 def sprite_mask(img):
@@ -120,9 +130,10 @@ def sprite_mask(img):
         body).  Detected by "has some fully-transparent pixels".
 
       * Green-screen PNG straight from mob_maker (fully-opaque alpha over a
-        (0,255,0) background): alpha is useless, so we cut by removing the green
-        screen.  We use connectivity (green connected to the image border) so a
-        mob's internal green survives where possible.
+        (0,255,0) background): alpha is useless, so we remove exact green screen
+        connected to the border plus one nearby anti-aliased fringe pixel.  The
+        loose green threshold is deliberately not allowed to grow through the
+        monster body.
     """
     if img is None:
         return None
