@@ -42,6 +42,7 @@ from src.engine.LieDetectorRuntime import LieDetectorRuntime
 from src.engine.LieDetectorWorker import LieDetectorWorker
 from src.utils.LieAlert import LocalSoundAlert
 from src.engine.FiniteStateMachine import FiniteStateMachine
+from src.engine.DirectionalAttackGate import DirectionalAttackGate
 from src.states.hunting import HuntingState
 from src.states.finding_rune import FindingRuneState
 from src.states.near_rune import NearRuneState
@@ -91,6 +92,7 @@ class MapleStoryAutoBot:
         self.cmd_move_x = "none" # "left" "right"
         self.cmd_move_y = "none" # "up" "down"
         self.cmd_action = "none" # "jump" "attack" ....
+        self._directional_attack_gate = DirectionalAttackGate()
         # Signals (for UI)
         self.image_debug_signal = None
         self.route_map_viz_signal = None
@@ -577,6 +579,7 @@ class MapleStoryAutoBot:
         self.t_watch_dog = time.time()
         self.t_last_teleport = time.time()
         self.t_last_attack = time.time()
+        self._directional_attack_gate.reset()
         self.t_last_minimap_update = time.time()
         self.t_to_change_channel = time.time()
 
@@ -3380,6 +3383,18 @@ class MapleStoryAutoBot:
             )
 
     def update_cmd_by_mob_detection(self):
+        # Directional-attack cooldown starts when the keyboard thread actually
+        # presses the attack key, not when this producer merely queues it.
+        # Keeping the two clocks in sync prevents a queued/cancelled attack
+        # from consuming a cooldown without firing.
+        if self.cfg["bot"]["attack"] == "directional" and self.kb is not None:
+            try:
+                sent_at = float(self.kb.get_last_attack_time())
+                if sent_at > self.t_last_attack:
+                    self.t_last_attack = sent_at
+            except (AttributeError, TypeError, ValueError):
+                pass
+
         # Reset the per-frame "there is a monster we can attack" flag.  It is
         # set below when a target is found and consumed by the FSM state to
         # give attacks priority over route/random movement commands.
@@ -3606,6 +3621,8 @@ class MapleStoryAutoBot:
             # If neither fallback fired, we still have len(self.monsters)==0
             # → keep the original behaviour (skip attack this frame).
             if len(self.monsters) == 0:
+                if self.cfg["bot"]["attack"] == "directional":
+                    self._directional_attack_gate.reset()
                 return
 
         # Update attack command
@@ -3649,21 +3666,43 @@ class MapleStoryAutoBot:
             if attack_direction is not None:
                 self._has_attackable_target = True
 
-            # Attack Command
-            if time.time() - self.t_last_attack > cooldown and attack_direction is not None:
+            # Two-phase turn-before-attack gate.  The facing snapshot comes
+            # from the keyboard thread after it actually dispatches a left or
+            # right input; a desired route direction is not treated as proof
+            # that the game has turned yet.
+            facing_direction = None
+            facing_changed_at = 0.0
+            attack_pending = False
+            if self.kb is not None:
+                try:
+                    facing_direction, facing_changed_at = \
+                        self.kb.get_facing_snapshot()
+                    attack_pending = self.kb.has_pending_action("attack")
+                except AttributeError:
+                    pass
+            now_wall = time.time()
+            now_mono = time.monotonic()
+            decision = self._directional_attack_gate.decide(
+                attack_direction,
+                facing_direction,
+                now=now_mono,
+                facing_changed_at=facing_changed_at,
+                turn_delay=self.cfg["directional_attack"].get(
+                    "character_turn_delay", 0.08),
+                cooldown_ready=(now_wall - self.t_last_attack > cooldown),
+                attack_pending=attack_pending,
+            )
+
+            if attack_direction is not None:
+                self.cmd_move_x = attack_direction
+
+            if decision.should_attack or decision.preserve_pending_attack:
                 self.cmd_action = "attack"
-                self.t_last_attack = time.time()
-                # Set up attack direction
-                self.cmd_move_x = attack_direction
             elif attack_direction is not None:
-                # There IS a monster in range but we're still on attack
-                # cooldown.  Don't let a leftover route command (jump/goal)
-                # ride through as the action this frame — hold the action so
-                # the character faces/waits for the mob instead of jumping
-                # away.  Keep the movement direction pointing at the mob.
-                if self.cmd_action in ("jump", "goal"):
-                    self.cmd_action = "none"
-                self.cmd_move_x = attack_direction
+                # During turning/cooldown, suppress route actions so only the
+                # facing input reaches the game.  t_last_attack is deliberately
+                # left unchanged until the keyboard thread sends a real attack.
+                self.cmd_action = "none"
 
         # VIZ: cache the non-empty-box counters on the instance so the
         # on-screen status line can show BOX=N FULL=… when detection
@@ -3680,6 +3719,8 @@ class MapleStoryAutoBot:
             if nearest_info is not None:
                 _cached["nearest"] = nearest_info
             _cached["attack_dir"] = attack_direction_str
+            if self.cfg["bot"]["attack"] == "directional":
+                _cached["attack_gate"] = decision.reason
             _cached["cmd_action_now"] = self.cmd_action
             self._last_mob_full_counters = _cached
         except Exception:
@@ -3711,6 +3752,7 @@ class MapleStoryAutoBot:
                         f"monsters_in_range={len(self.monsters)} "
                         f"nearest={nearest_info!r} "
                         f"attack_dir={attack_direction_str!r} "
+                        f"attack_gate={getattr(locals().get('decision', None), 'reason', None)!r} "
                         f"cmd_action_now={self.cmd_action!r} "
                         f"cd_left={max(0, cooldown - dt_cd):.1f}s "
                         f"t_last_attack={dt_cd:.1f}s_ago "

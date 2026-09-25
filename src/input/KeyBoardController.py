@@ -15,6 +15,7 @@ from pynput import keyboard
 # Local import
 from src.utils.logger import logger
 from src.utils.common import is_mac
+from src.input.CommandMailbox import CommandMailbox
 
 if is_mac():
     import Quartz
@@ -1513,9 +1514,11 @@ class KeyBoardController():
     '''
     def __init__(self, cfg):
         self.cfg = cfg
-        self.cmd_action = "none"
-        self.cmd_up_down = "none"
-        self.cmd_left_right = "none"
+        self._command_mailbox = CommandMailbox()
+        self._execution_state_lock = threading.Lock()
+        self._facing_direction = None
+        self._facing_changed_at = 0.0
+        self._last_attack_sent_at = 0.0
         self.cmd_up_down_last = ""
         self.cmd_left_right_last = ""
 
@@ -1815,7 +1818,43 @@ class KeyBoardController():
         '''
         Set keyboard command
         '''
-        self.cmd_left_right, self.cmd_up_down, self.cmd_action = new_command.split()
+        left_right, up_down, action = new_command.split()
+        self._command_mailbox.publish(left_right, up_down, action)
+
+    @property
+    def cmd_left_right(self):
+        return self._command_mailbox.snapshot().left_right
+
+    @property
+    def cmd_up_down(self):
+        return self._command_mailbox.snapshot().up_down
+
+    @property
+    def cmd_action(self):
+        return self._command_mailbox.snapshot().action
+
+    def has_pending_action(self, action):
+        return self._command_mailbox.has_pending_action(action)
+
+    def get_facing_snapshot(self):
+        with self._execution_state_lock:
+            return self._facing_direction, self._facing_changed_at
+
+    def get_last_attack_time(self):
+        with self._execution_state_lock:
+            return self._last_attack_sent_at
+
+    def _record_facing(self, direction):
+        if direction not in ("left", "right"):
+            return
+        with self._execution_state_lock:
+            if self._facing_direction != direction:
+                self._facing_direction = direction
+                self._facing_changed_at = time.monotonic()
+
+    def _record_attack_sent(self):
+        with self._execution_state_lock:
+            self._last_attack_sent_at = time.time()
 
     def is_game_window_active(self):
         '''
@@ -2169,6 +2208,13 @@ class KeyBoardController():
         '''
         Release all key (keyboard + any held gamepad buttons + stick zero).
         '''
+        # Invalidate any one-shot action that the worker has not consumed yet.
+        # Otherwise pausing/resting between queue and execution could replay a
+        # stale attack when automation resumes.
+        try:
+            self._command_mailbox.clear()
+        except AttributeError:
+            pass
         key_up("left")
         key_up("right")
         key_up("up")
@@ -2292,6 +2338,15 @@ class KeyBoardController():
                     self.limit_fps()
                     continue
 
+            # Consume one immutable command snapshot for this entire loop.
+            # The main thread may publish a newer command while key injection
+            # is in progress, but it cannot splice a new action onto an old
+            # direction (or vice versa).
+            command = self._command_mailbox.snapshot()
+            cmd_left_right = command.left_right
+            cmd_up_down = command.up_down
+            cmd_action = command.action
+
             # Buff skill
             for i, buff_skill_key in enumerate(self.cfg["buff_skill"]["keys"]):
                 cooldown = self.cfg["buff_skill"]["cooldown"][i]
@@ -2304,9 +2359,12 @@ class KeyBoardController():
                     self.t_last_skill = time.time()
                     break
 
-            # Force Heal
-            if self.is_need_force_heal:
-                self.cmd_action = "add_hp"
+            # Force Heal.  It overrides this immutable command snapshot for
+            # the current loop.  Consume any queued action after healing so a
+            # stale attack is not fired later when force-heal clears.
+            force_heal_override = bool(self.is_need_force_heal)
+            if force_heal_override:
+                cmd_action = "add_hp"
 
             ##########################
             ### Left-Right Command ###
@@ -2317,33 +2375,35 @@ class KeyBoardController():
             # level virtual pad *once* at the end (avoids redundant USB
             # reports every frame).
             target_x = None
-            if self.cmd_left_right == "left":
+            if cmd_left_right == "left":
                 key_up("right")
                 if self.move_by_tap:
                     press_key("left", self.move_tap_hold)
                 else:
                     key_down("left")
+                self._record_facing("left")
                 target_x = -1.0
-            elif self.cmd_left_right == "right":
+            elif cmd_left_right == "right":
                 key_up("left")
                 if self.move_by_tap:
                     press_key("right", self.move_tap_hold)
                 else:
                     key_down("right")
+                self._record_facing("right")
                 target_x = +1.0
-            elif self.cmd_left_right == "stop":
+            elif cmd_left_right == "stop":
                 key_up("left")
                 key_up("right")
                 target_x = 0.0
-            elif self.cmd_left_right == "none":
+            elif cmd_left_right == "none":
                 if self.cmd_left_right_last != "none":
                     key_up("left")
                     key_up("right")
                     target_x = 0.0
             else:
                 logger.error("[KeyBoardController] Unsupported left-right command: "
-                             f"{self.cmd_left_right}")
-            self.cmd_left_right_last = self.cmd_left_right
+                             f"{cmd_left_right}")
+            self.cmd_left_right_last = cmd_left_right
             # Push X axis to vgamepad if enabled
             if target_x is not None:
                 _vgp_set_axis(target_x, None)
@@ -2352,33 +2412,33 @@ class KeyBoardController():
             ### Up-Down Command ###
             #######################
             target_y = None
-            if self.cmd_up_down == "up":
+            if cmd_up_down == "up":
                 key_up("down")
                 if self.move_by_tap:
                     press_key("up", self.move_tap_hold)
                 else:
                     key_down("up")
                 target_y = +1.0
-            elif self.cmd_up_down == "down":
+            elif cmd_up_down == "down":
                 key_up("up")
                 if self.move_by_tap:
                     press_key("down", self.move_tap_hold)
                 else:
                     key_down("down")
                 target_y = -1.0
-            elif self.cmd_up_down == "stop":
+            elif cmd_up_down == "stop":
                 key_up("up")
                 key_up("down")
                 target_y = 0.0
-            elif self.cmd_up_down == "none":
+            elif cmd_up_down == "none":
                 if self.cmd_up_down_last != "none":
                     key_up("up")
                     key_up("down")
                     target_y = 0.0
             else:
                 logger.error("[KeyBoardController] Unsupported up-down command: "
-                             f"{self.cmd_up_down}")
-            self.cmd_up_down_last = self.cmd_up_down
+                             f"{cmd_up_down}")
+            self.cmd_up_down_last = cmd_up_down
             # Push Y axis to vgamepad if enabled
             if target_y is not None:
                 _vgp_set_axis(None, target_y)
@@ -2386,7 +2446,7 @@ class KeyBoardController():
             ######################
             ### Action Command ###
             ######################
-            if self.cmd_action == "jump":
+            if cmd_action == "jump":
                 # Throttle jumps.  Unlike attack (which clears cmd_action after
                 # one press), a route "jump" waypoint keeps cmd_action=="jump"
                 # for as long as the player sits on that colour code.  Firing
@@ -2402,11 +2462,23 @@ class KeyBoardController():
                 if _now_jump - self.t_last_jump_down >= _jump_iv:
                     do_action_key("jump", self.cfg["key"]["jump"])
                     self.t_last_jump_down = _now_jump
-            elif self.cmd_action == "teleport":
+            elif cmd_action == "teleport":
                 do_action_key("teleport", self.cfg["key"]["teleport"])
-            elif self.cmd_action == "attack":
-                do_action_key("attack", self.attack_key)
-                self.t_last_skill = time.time()
+            elif cmd_action == "attack":
+                # The producer normally enforces this cooldown.  Recheck it
+                # here as the final arbiter so a narrow producer/consumer race
+                # cannot requeue the same attack just after it was consumed.
+                now_attack = time.time()
+                attack_cooldown = float(
+                    self.cfg.get("directional_attack", {}).get(
+                        "cooldown", 0.0
+                    )
+                ) if self.cfg.get("bot", {}).get("attack") == \
+                    "directional" else 0.0
+                if now_attack - self.get_last_attack_time() >= attack_cooldown:
+                    do_action_key("attack", self.attack_key)
+                    self.t_last_skill = time.time()
+                    self._record_attack_sent()
                 # Reset to "none" (like add_hp/add_mp below).  Previously the
                 # attack command LATCHED: the FSM sets cmd_action="attack" once
                 # (e.g. every 2.5 s in patrol) but neither side cleared it, so
@@ -2414,21 +2486,27 @@ class KeyBoardController():
                 # (~2 Hz), completely bypassing patrol_attack_interval and
                 # freezing the character in an attack-lock so it never walked.
                 # Clearing it here means one FSM "attack" request == exactly one
-                # key press; movement resumes between requests.
-                self.cmd_action = "none"
-            elif self.cmd_action == "add_hp":
+                # key press; movement resumes between requests.  A duplicate
+                # queued inside the cooldown is consumed without firing.
+                self._command_mailbox.consume_action(command.sequence, "attack")
+            elif cmd_action == "add_hp":
                 do_action_key("add_hp", self.cfg["key"]["add_hp"])
-                self.cmd_action = "none"  # Reset command
-            elif self.cmd_action == "add_mp":
+                if force_heal_override and command.action != "none":
+                    self._command_mailbox.consume_action(
+                        command.sequence, command.action)
+                elif not self.is_need_force_heal:
+                    self._command_mailbox.consume_action(
+                        command.sequence, "add_hp")
+            elif cmd_action == "add_mp":
                 do_action_key("add_mp", self.cfg["key"]["add_mp"])
-                self.cmd_action = "none"  # Reset command
-            elif self.cmd_action == "goal":
+                self._command_mailbox.consume_action(command.sequence, "add_mp")
+            elif cmd_action == "goal":
                 pass
-            elif self.cmd_action == "none":
+            elif cmd_action == "none":
                 pass
             else:
                 logger.error("[KeyBoardController] Unsupported action command: "
-                             f"{self.cmd_action}")
+                             f"{cmd_action}")
 
             # --- 3-s periodic keyboard diagnostic heartbeat ---------------
             # The user reported "bot says it sent keys but the character
@@ -2445,12 +2523,12 @@ class KeyBoardController():
                 t_next_kb_diag = now2 + 3.0
                 is_act, fg_title = self.is_game_window_active()
                 held = []
-                if self.cmd_left_right == "left":  held.append("LEFT")
-                if self.cmd_left_right == "right": held.append("RIGHT")
-                if self.cmd_up_down   == "up":     held.append("UP")
-                if self.cmd_up_down   == "down":   held.append("DOWN")
-                if self.cmd_action not in ("none", "goal"):
-                    held.append(f"ACT:{self.cmd_action}")
+                if cmd_left_right == "left":  held.append("LEFT")
+                if cmd_left_right == "right": held.append("RIGHT")
+                if cmd_up_down   == "up":     held.append("UP")
+                if cmd_up_down   == "down":   held.append("DOWN")
+                if cmd_action not in ("none", "goal"):
+                    held.append(f"ACT:{cmd_action}")
                 held_str = "+".join(held) if held else "<idle>"
                 try:
                     backend, _bts, consec = get_last_backend_info()
@@ -2518,7 +2596,7 @@ class KeyBoardController():
                 # from previous heartbeats don't bleed over.
                 gas_str = "gas=skip"
                 gas_map  = "gas_map=-----"
-                if not held and self.cmd_action in ("none", "goal") and is_act and _WIN_OK:
+                if not held and cmd_action in ("none", "goal") and is_act and _WIN_OK:
                     try:
                         VK_LEFT = 0x25
                         if _USER32 is None:
@@ -2673,7 +2751,7 @@ class KeyBoardController():
                 logger.info(
                     "[KeyBoardController] HEARTBEAT: "
                     f"keys={held_str} "
-                    f"cmd=({self.cmd_left_right},{self.cmd_up_down},{self.cmd_action}) "
+                    f"cmd=({cmd_left_right},{cmd_up_down},{cmd_action}) "
                     f"focus={is_act} foreground={fg_title!r} "
                     f"backend={backend} conseq_fail={consec} "
                     f"{nt_str} {gas_str} {gas_map} "
@@ -2692,7 +2770,7 @@ class KeyBoardController():
                 if not self._kb_block_warned and \
                    now2 - self.t_last_run > 30.0 and \
                    consec >= 30 and \
-                   (held or self.cmd_action not in ("none", "goal")) and \
+                   (held or cmd_action not in ("none", "goal")) and \
                    is_act:
                     self._kb_block_warned = True
                     logger.warning(

@@ -77,7 +77,7 @@ directional_attack:
                              #    can be "in the box" yet un-hittable. Lower this to stop swinging when the
                              #    mob is not on the same line; set 0/negative to disable this y-gate.
   cooldown: 0.9              # ⏱️ Time between attacks (in seconds)
-  character_turn_delay: 0.02 # 🔄 Delay after turning before attacking (in seconds)
+  character_turn_delay: 0.08 # 🔄 Wait after a real direction input before attacking behind; 0.06~0.10 is typical
 
 aoe_skill:
   # 💥 AoE Skill
