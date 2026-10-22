@@ -1,0 +1,52 @@
+bot:
+  attack: directional
+  map: dangerous_peak
+  mode: normal
+channel_change:
+  mode: 'true'
+directional_attack:
+  cooldown: 0.1
+  max_y_diff: 30
+  range_x: 210
+  range_y: 100
+health_monitor:
+  debug_dump: true
+key:
+  directional_attack: x
+  jump: alt
+  move_by_tap: false
+  move_tap_hold: 0.08
+  teleport: shift
+minimap:
+  auto_max_h_ratio: 0.18
+  auto_max_w_ratio: 0.18
+  debug_dump: true
+  manual_roi:
+  - 5
+  - 41
+  - 124
+  - 130
+  player_color:
+  - 50
+  - 255
+  - 238
+monster_detect:
+  mode: yolo
+  yolo_conf_thres: 0.7
+  yolo_model_path: models/mob_yolo_boar.pt
+nametag:
+  mode: histogram_eq
+patrol:
+  jump_cooldown: 1.0
+  patrol_attack_interval: 0.5
+buff_skill:
+  keys:
+  - '4'
+  cooldown:
+  - 300
+  action_cooldown: 1
+chair_rest:
+  rounds_before_rest: 5
+  enabled: false
+lie_detector:
+  enabled: true
