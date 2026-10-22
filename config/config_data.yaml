@@ -29,6 +29,8 @@ eng_to_cn:
   south_forest_training_ground_4: 南部森林训练场4
   east_mountain_6: 东部岩山6
   deep_mountain_3: 幽深峡谷3
+  dark_forest_hunter_1: 黑森林打猎场1
+  dangerous_peak: 危险的峡谷
   
   # monster
   zombie_lupin: 天使猴
@@ -100,3 +102,5 @@ map_mobs_mapping:
   south_forest_training_ground_4: [slime, horny_mushroom, blue_mushroom, green_mushroom]
   east_mountain_6: [wild_boar, dark_axe_stump]
   deep_mountain_3: [wild_boar, fire_boar, axe_stump, dark_axe_stump]
+  dark_forest_hunter_1: [wild_boar, fire_boar, axe_stump, dark_axe_stump]
+  dangerous_peak: [fire_boar]
