@@ -1,0 +1,13 @@
+path: dark_forest_hunter
+train: images/train
+val: images/val
+auto_scan: false
+names:
+  0: green_mushroom
+  1: slime
+  2: snail
+  3: octopus
+  4: jr._necki
+  5: curse_eye
+  6: jr._boogie_1
+  7: player

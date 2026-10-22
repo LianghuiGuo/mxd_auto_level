@@ -1,0 +1,10 @@
+path: dataset_horny_mushroom
+train: images/train
+val: images/val
+auto_scan: false
+names:
+  0: slime
+  1: green_mushroom
+  2: horny_mushroom
+  3: blue_mushroom
+  4: player

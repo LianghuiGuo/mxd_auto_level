@@ -1,0 +1,72 @@
+{
+  "per_video": 8,
+  "seed": 20260906,
+  "videos": [
+    {
+      "filename": "测谎录屏1.mp4",
+      "split": "train",
+      "available": 69,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏10.mp4",
+      "split": "train",
+      "available": 64,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏11.mp4",
+      "split": "val",
+      "available": 72,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏2.mp4",
+      "split": "train",
+      "available": 65,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏3.mp4",
+      "split": "train",
+      "available": 83,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏4.mp4",
+      "split": "val",
+      "available": 33,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏5.mp4",
+      "split": "train",
+      "available": 41,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏6.mp4",
+      "split": "train",
+      "available": 69,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏7.mp4",
+      "split": "train",
+      "available": 32,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏8.mp4",
+      "split": "train",
+      "available": 64,
+      "sampled": 8
+    },
+    {
+      "filename": "测谎录屏9.mp4",
+      "split": "train",
+      "available": 72,
+      "sampled": 8
+    }
+  ]
+}

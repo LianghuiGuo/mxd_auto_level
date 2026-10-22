@@ -1,0 +1,10 @@
+path: dataset_boar
+train: images/train
+val: images/val
+auto_scan: false
+names:
+  0: wild_boar
+  1: fire_boar
+  2: axe_stump
+  3: dark_axe_stump
+  4: player

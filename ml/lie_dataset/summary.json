@@ -1,0 +1,265 @@
+{
+  "seed": 20260831,
+  "image_size": [
+    960,
+    640
+  ],
+  "train_images": 2000,
+  "val_images": 500,
+  "total_boxes": 20177,
+  "images_per_family": {
+    "circle": 100,
+    "star": 100,
+    "irregular": 100,
+    "rounded_polygon": 100,
+    "triangle": 100,
+    "square": 100,
+    "rectangle": 100,
+    "pentagon": 100,
+    "hexagon": 100,
+    "octagon": 100,
+    "capsule": 100,
+    "trapezoid": 100,
+    "concave_arrow": 100,
+    "cross": 100,
+    "gear": 100,
+    "irregular_01": 100,
+    "irregular_02": 100,
+    "irregular_03": 100,
+    "irregular_04": 100,
+    "irregular_05": 100,
+    "irregular_06": 100,
+    "irregular_07": 100,
+    "irregular_08": 100,
+    "irregular_09": 100,
+    "irregular_10": 100
+  },
+  "shape_family_count": 25,
+  "procedural_shapes": [
+    {
+      "family": "triangle",
+      "kind": "regular_3",
+      "diameter": 135.0,
+      "min_count": 7,
+      "max_count": 11
+    },
+    {
+      "family": "square",
+      "kind": "regular_4",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "rectangle",
+      "kind": "rectangle",
+      "diameter": 175.0,
+      "min_count": 5,
+      "max_count": 9
+    },
+    {
+      "family": "pentagon",
+      "kind": "regular_5",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "hexagon",
+      "kind": "regular_6",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "octagon",
+      "kind": "regular_8",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "capsule",
+      "kind": "capsule",
+      "diameter": 175.0,
+      "min_count": 5,
+      "max_count": 9
+    },
+    {
+      "family": "trapezoid",
+      "kind": "trapezoid",
+      "diameter": 155.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "concave_arrow",
+      "kind": "concave_arrow",
+      "diameter": 155.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "cross",
+      "kind": "cross",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "gear",
+      "kind": "gear_8",
+      "diameter": 135.0,
+      "min_count": 7,
+      "max_count": 11
+    },
+    {
+      "family": "irregular_01",
+      "kind": "irregular:101:5:0",
+      "diameter": 150.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "irregular_02",
+      "kind": "irregular:211:6:0",
+      "diameter": 150.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "irregular_03",
+      "kind": "irregular:307:7:0",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "irregular_04",
+      "kind": "irregular:401:8:0",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "irregular_05",
+      "kind": "irregular:503:9:0",
+      "diameter": 140.0,
+      "min_count": 7,
+      "max_count": 11
+    },
+    {
+      "family": "irregular_06",
+      "kind": "irregular:601:6:2",
+      "diameter": 160.0,
+      "min_count": 6,
+      "max_count": 9
+    },
+    {
+      "family": "irregular_07",
+      "kind": "irregular:701:7:2",
+      "diameter": 155.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "irregular_08",
+      "kind": "irregular:809:8:2",
+      "diameter": 150.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "irregular_09",
+      "kind": "irregular:907:10:1",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    },
+    {
+      "family": "irregular_10",
+      "kind": "irregular:1009:12:2",
+      "diameter": 145.0,
+      "min_count": 6,
+      "max_count": 10
+    }
+  ],
+  "sources": [
+    {
+      "filename": "测谎视频.mp4",
+      "roi": [
+        418,
+        198,
+        1012,
+        676
+      ],
+      "safe_crop": [
+        116,
+        0,
+        780,
+        520
+      ],
+      "seed_time": 0.0,
+      "active_start": 0.3,
+      "active_end": 13.0,
+      "family": "circle"
+    },
+    {
+      "filename": "测谎视频2.mp4",
+      "roi": [
+        290,
+        109,
+        700,
+        464
+      ],
+      "safe_crop": [
+        0,
+        0,
+        700,
+        464
+      ],
+      "seed_time": 8.5,
+      "active_start": 8.5,
+      "active_end": 24.5,
+      "family": "star"
+    },
+    {
+      "filename": "测谎视频3.mp4",
+      "roi": [
+        474,
+        213,
+        982,
+        656
+      ],
+      "safe_crop": [
+        0,
+        0,
+        982,
+        656
+      ],
+      "seed_time": 0.0,
+      "active_start": 0.3,
+      "active_end": 12.3,
+      "family": "irregular"
+    },
+    {
+      "filename": "测谎视频4.mp4",
+      "roi": [
+        429,
+        150,
+        1050,
+        700
+      ],
+      "safe_crop": [
+        0,
+        0,
+        900,
+        600
+      ],
+      "seed_time": 0.0,
+      "active_start": 0.3,
+      "active_end": 12.8,
+      "family": "rounded_polygon"
+    }
+  ]
+}

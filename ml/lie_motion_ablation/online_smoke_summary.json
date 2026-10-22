@@ -1,0 +1,19 @@
+{
+  "tag": "motion_smoke",
+  "results": [
+    {
+      "label": "录屏4",
+      "within_40px_ratio": 0.9778481012658228,
+      "within_radius_active_ratio": 0.9778481012658228,
+      "median_error_px": 14.762371991925654,
+      "p95_error_px": 27.336715447370935,
+      "identity_switches": 5,
+      "ranker_switches": 2,
+      "evaluated_frames": 316,
+      "evaluated_error_frames": 316,
+      "prediction_coverage_ratio": 1.0,
+      "acquired_frame_ratio": 1.0,
+      "actionable_frame_ratio": 1.0
+    }
+  ]
+}
