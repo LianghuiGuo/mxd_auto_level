@@ -94,7 +94,7 @@ minimap:
 | `255,0,255` | 💜 品红 | `none none jump` | 原地跳 |
 | `0,127,255` | 橙青 | `none up jump` | 跳 + 上（爬绳：先跳再按上）|
 | `0,255,127` | 🟢 浅绿 | `stop stop stop` | 停止 |
-| `255,255,0` | 🟨 黄 | `none none goal` | **路点终点**（切下一条路线）|
+| `128,0,128` | 🟪 紫 | `none none goal` | **路点终点**（切下一条路线）|
 | `255,0,127` | 🌸 粉 | `none up teleport` | 上 + 传送（法师）|
 | `127,0,255` | 🟪 紫 | `none down teleport` | 下 + 传送 |
 | `0,127,0` | 🟩 深绿 | `left none teleport` | 左 + 传送 |

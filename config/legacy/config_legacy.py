@@ -159,7 +159,7 @@ class Config:
         (127,127,127): "up", # gray
         (255,255,127): "down", # light_yellow
         (0,255,127): "stop", # pink_green
-        (255,255,0): "goal", # yellow
+        (128,0,128): "goal", # purple
         (255,0,127): "teleport up", # pink
         (127,0,255): "teleport down", # light_purple
     }

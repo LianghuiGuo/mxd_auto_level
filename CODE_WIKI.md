@@ -595,7 +595,7 @@ self.fsm.set_init_state("hunting")
 | 127,255,0 | none down jump | 向下跳（跳下平台） |
 | 255,0,255 | none none jump | 原地跳 |
 | 0,255,127 | stop stop stop | 停止 |
-| 255,255,0 | none none goal | 路线终点，切换到下一条路线 |
+| 128,0,128 | none none goal | 路线终点，切换到下一条路线 |
 | 255,0,127 | none up teleport | 向上瞬移 |
 | 127,0,255 | none down teleport | 向下瞬移 |
 | 0,127,0 | left none teleport | 向左瞬移 |
