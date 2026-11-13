@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Callable, Optional
 
 import cv2
@@ -302,6 +303,8 @@ class LieDetectorRuntime:
         # instead of waiting out one click interval.
         self._last_confirm_click_at = float("-inf")
         self._last_tracking_error_at = float("-inf")
+        self._panel_started_at = None
+        self._last_roi_log_at = float("-inf")
 
     def _reset_tracker(self) -> None:
         if self._tracker is not None:
@@ -382,6 +385,33 @@ class LieDetectorRuntime:
             )
         return self._tracker
 
+    def _save_roi_diagnostics(self, frame: np.ndarray) -> None:
+        x, y, width, height = self._roi
+        output = Path("log")
+        write_started = time.monotonic()
+        try:
+            output.mkdir(exist_ok=True)
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x, y), (x + width, y + height), (0, 255, 0), 2)
+            images = (
+                ("lie_sdk_input_frame.png", frame),
+                ("lie_sdk_input_roi.png", frame[y:y + height, x:x + width]),
+                ("lie_sdk_input_overlay.png", overlay),
+            )
+            for name, image in images:
+                path = output / name
+                if not cv2.imwrite(str(path), image, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
+                    raise OSError(f"Could not write {path}")
+            logger.info(
+                "[Lie Detector] Input snapshots saved to "
+                "log/lie_sdk_input_{frame,roi,overlay}.png; "
+                "coordinates are title-free capture pixels; "
+                "the next challenge overwrites these files; "
+                f"write_ms={(time.monotonic() - write_started) * 1000:.1f}."
+            )
+        except (OSError, cv2.error) as exc:
+            logger.warning(f"[Lie Detector] Could not save input snapshots: {exc}")
+
     # -- per-frame ---------------------------------------------------------
     @staticmethod
     def _valid_roi(roi: tuple[int, int, int, int], frame: np.ndarray) -> bool:
@@ -419,6 +449,14 @@ class LieDetectorRuntime:
     def _update_panel(
         self, frame_bgr: np.ndarray, timestamp: float
     ) -> LieDetectorRuntimeResult:
+        if self._panel_started_at is None:
+            self._panel_started_at = timestamp
+            logger.info(
+                f"[Lie Detector] Panel input detected; backend="
+                f"{self.config.get('backend', 'trtyolo')}; "
+                f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]}); "
+                f"roi_lock_samples={self.roi_lock_samples}."
+            )
         self._miss_streak = 0
         self._seen_streak += 1
         self.phase = PHASE_PANEL
@@ -443,9 +481,22 @@ class LieDetectorRuntime:
                     self._roi_locked = True
                     logger.info(
                         "[Lie Detector] Panel ROI locked from "
-                        f"{len(self._roi_samples)} samples: {locked}."
+                        f"{len(self._roi_samples)} samples: {locked}; "
+                        f"wait_s={timestamp - self._panel_started_at:.2f}; "
+                        f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]})."
                     )
+                    if self.config.get("backend", "trtyolo") == "trtyolo":
+                        self._save_roi_diagnostics(frame_bgr)
         if self._roi is None:
+            if timestamp - self._last_roi_log_at >= 5.0:
+                self._last_roi_log_at = timestamp
+                logger.info(
+                    f"[Lie Detector] Waiting for ROI; valid_samples="
+                    f"{len(self._roi_samples)}/{self.roi_lock_samples}; "
+                    f"panel_frames={self._seen_streak}; "
+                    f"elapsed_s={timestamp - self._panel_started_at:.2f}; "
+                    "tracker has not received an input frame yet."
+                )
             # Panel proven present but ROI is still being stabilised: pause
             # the bot, but do not initialise tracks in a moving coordinate
             # system or touch the pointer.
@@ -464,7 +515,11 @@ class LieDetectorRuntime:
         except Exception as exc:
             if timestamp - self._last_tracking_error_at >= 5.0:
                 self._last_tracking_error_at = timestamp
-                logger.error(f"[Lie Detector] Tracking failed; holding pointer: {exc}")
+                logger.error(
+                    f"[Lie Detector] Tracking failed; holding pointer; "
+                    f"roi={self._roi}; panel_frames={self._seen_streak}; "
+                    f"elapsed_s={timestamp - self._panel_started_at:.2f}; error={exc}"
+                )
             return LieDetectorRuntimeResult(
                 engaged=True,
                 phase=PHASE_PANEL,
@@ -493,7 +548,11 @@ class LieDetectorRuntime:
         )
 
     def _enter_confirm_phase(self, timestamp: float) -> None:
+        logger.info(
+            "[Lie Detector] Resetting tracker because the panel disappeared."
+        )
         self._reset_tracker()
+        self._panel_started_at = None
         self.phase = PHASE_CONFIRM
         self._roi = None
         self._roi_samples = []

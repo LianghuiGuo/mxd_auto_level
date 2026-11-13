@@ -210,6 +210,78 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         expected = Path(__file__).resolve().parents[1] / "external_sdk" / "bin64"
         add_directory.assert_called_once_with(str(expected))
 
+    @patch("src.engine.LieDetectorSdkTracker.logger")
+    def test_first_lock_and_relock_are_logged_without_per_frame_spam(self, log):
+        tracker = self._tracker()
+        log.reset_mock()
+        with patch("src.engine.LieDetectorSdkTracker.time.monotonic", return_value=10.0):
+            self.status = 1
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+            for _ in range(20):
+                tracker.update(np.zeros((100, 120, 3), np.uint8))
+            self.status = 0
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+        with patch("src.engine.LieDetectorSdkTracker.time.monotonic", return_value=11.1):
+            self.status = 1
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+        with patch("src.engine.LieDetectorSdkTracker.time.monotonic", return_value=12.2):
+            self.status = 0
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+        messages = [call.args[0] for call in log.info.call_args_list]
+        self.assertEqual(sum("First input" in text for text in messages), 1)
+        transitions = [text for text in messages if "State " in text]
+        self.assertEqual(len(transitions), 4)
+        self.assertIn("INITIAL->NOTREADY", transitions[0])
+        self.assertIn("NOTREADY->LOCKED", transitions[1])
+        self.assertIn("frame=22", transitions[1])
+        self.assertIn("out=[0, 30, 40", transitions[1])
+        self.assertIn("LOCKED->NOTREADY", transitions[2])
+        self.assertIn("NOTREADY->LOCKED", transitions[3])
+        with patch("src.engine.LieDetectorSdkTracker.time.monotonic", return_value=12.2):
+            tracker.close()
+
+    @patch("src.engine.LieDetectorSdkTracker.logger")
+    def test_summary_is_emitted_every_five_seconds_and_on_reset(self, log):
+        tracker = self._tracker()
+        log.reset_mock()
+        self.status = 1
+        with patch("src.engine.LieDetectorSdkTracker.time.monotonic", return_value=10.0):
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+        with patch("src.engine.LieDetectorSdkTracker.time.monotonic", return_value=14.9):
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+        self.assertFalse(any("Summary" in c.args[0] for c in log.info.call_args_list))
+        with patch("src.engine.LieDetectorSdkTracker.time.monotonic", return_value=15.0):
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+            tracker.reset()
+        messages = [call.args[0] for call in log.info.call_args_list]
+        summaries = [text for text in messages if "Summary" in text]
+        self.assertEqual(len(summaries), 2)
+        self.assertIn("reason=interval", summaries[0])
+        self.assertIn("NOTREADY=3", summaries[0])
+        self.assertIn("notready_streak=3", summaries[0])
+        self.assertIn("avg_sdk_ms=47.0", summaries[0])
+        self.assertIn("reason=reset", summaries[1])
+        self.assertEqual(tracker._status_counts, [0, 0, 0])
+
+    @patch("src.engine.LieDetectorSdkTracker.logger")
+    def test_sdk_error_log_and_exception_include_input_context(self, log):
+        tracker = self._tracker()
+        self.status = 2
+        self.lib.TTx_LastError.return_value = "识别失败".encode("gbk")
+        with self.assertRaisesRegex(RuntimeError, "status=2.*roi_wh=\\(120,100\\).*识别失败"):
+            tracker.update(np.zeros((100, 120, 3), np.uint8))
+        self.assertEqual(tracker._status_counts, [0, 0, 1])
+        self.assertIn("INITIAL->ERROR", log.warning.call_args.args[0])
+
+    @patch("src.engine.LieDetectorSdkTracker.logger")
+    def test_out_of_bounds_is_explicit_in_diagnostics(self, log):
+        tracker = self._tracker()
+        self.output[1] = 120
+        result = tracker.update(np.zeros((100, 120, 3), np.uint8))
+        self.assertFalse(result.actionable)
+        self.assertIn("OUT_OF_BOUNDS", log.warning.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

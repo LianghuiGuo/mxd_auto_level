@@ -1,6 +1,8 @@
 import threading
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -149,6 +151,34 @@ class LieDetectorWorkerTest(unittest.TestCase):
             worker.stop()
         self.assertEqual(cleanup, ["closed"])
         self.assertEqual(callbacks, [])
+
+    @patch("src.engine.LieDetectorWorker.logger")
+    def test_throughput_log_includes_source_age_and_processing_time(self, log):
+        worker = None
+        sequence = 0
+
+        def source(_last_sequence):
+            nonlocal sequence
+            sequence += 1
+            return sequence, np.zeros((8, 8, 3), np.uint8), time.monotonic() - 0.01
+
+        def on_result(_snapshot):
+            if sequence == 2:
+                worker._stop_event.set()
+
+        worker = LieDetectorWorker(
+            source, lambda _frame, _timestamp: SimpleNamespace(engaged=True),
+            target_fps=1000, on_result=on_result,
+        )
+        worker._process_frames()
+        throughput = [
+            call.args[0] for call in log.info.call_args_list
+            if "Worker throughput" in call.args[0]
+        ]
+        self.assertEqual(len(throughput), 1)
+        self.assertIn("sequence=2", throughput[0])
+        self.assertIn("frame_age_ms=", throughput[0])
+        self.assertIn("processing_ms=", throughput[0])
 
 
 if __name__ == "__main__":

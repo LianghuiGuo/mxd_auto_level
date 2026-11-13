@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -34,6 +35,8 @@ class LieDetectorSdkTracker:
         self._frame_size = None
         self.last_ms = 0
         self.backend = ""
+        self._clear_diagnostics()
+        initialization_started = time.monotonic()
 
         if sys.platform != "win32" or ctypes.sizeof(ctypes.c_void_p) != 8:
             raise RuntimeError("trtyolo SDK requires Windows and 64-bit Python")
@@ -75,11 +78,76 @@ class LieDetectorSdkTracker:
             self.backend = (self._lib.TTx_Backend(self._handle) or b"").decode("ascii")
             logger.info(
                 f"[Lie Detector] SDK v{version} ready; backend={self.backend}; "
-                f"directory={directory}."
+                f"directory={directory}; force_cpu={force_cpu}; "
+                f"initialization_ms={(time.monotonic() - initialization_started) * 1000:.1f}."
             )
         except Exception:
             self.close()
             raise
+
+    def _clear_diagnostics(self) -> None:
+        self._status_counts = [0, 0, 0]
+        self._sdk_ms_sum = 0.0
+        self._call_ms_sum = 0.0
+        self._first_feed_at = None
+        self._last_summary_at = None
+        self._last_state = None
+        self._last_transition_at = float("-inf")
+        self._first_lock_frame = None
+        self._notready_streak = 0
+
+    def _log_summary(self, reason: str, now: float) -> None:
+        frames = sum(self._status_counts)
+        if not frames:
+            return
+        elapsed = now - self._first_feed_at
+        logger.info(
+            f"[Lie Detector SDK] Summary reason={reason}; backend={self.backend}; "
+            f"roi_wh={self._frame_size}; frames={frames}; "
+            f"LOCKED={self._status_counts[0]} NOTREADY={self._status_counts[1]} "
+            f"ERROR={self._status_counts[2]}; notready_streak={self._notready_streak}; "
+            f"first_lock_frame={self._first_lock_frame}; elapsed_s={elapsed:.2f}; "
+            f"avg_sdk_ms={self._sdk_ms_sum / frames:.1f}; "
+            f"avg_call_ms={self._call_ms_sum / frames:.1f}."
+        )
+        self._last_summary_at = now
+
+    def _record_diagnostics(
+        self, status: int, out, width: int, height: int, stride: int,
+        call_ms: float, now: float,
+    ) -> None:
+        if self._first_feed_at is None:
+            self._first_feed_at = now - call_ms / 1000.0
+            self._last_summary_at = self._first_feed_at
+        self._status_counts[status if status in (0, 1) else 2] += 1
+        self._sdk_ms_sum += self.last_ms
+        self._call_ms_sum += call_ms
+        self._notready_streak = self._notready_streak + 1 if status == 1 else 0
+        frames = sum(self._status_counts)
+        first_lock = status == 0 and self._first_lock_frame is None
+        if first_lock:
+            self._first_lock_frame = frames
+        state = {0: "LOCKED", 1: "NOTREADY"}.get(status, "ERROR")
+        if status == 0 and not (0 <= out[1] < width and 0 <= out[2] < height):
+            state = "OUT_OF_BOUNDS"
+        if first_lock or (
+            state != self._last_state and now - self._last_transition_at >= 1.0
+        ):
+            message = (
+                f"[Lie Detector SDK] State {self._last_state or 'INITIAL'}->{state}; "
+                f"frame={frames}; status={status}; roi_wh=({width},{height}); "
+                f"stride={stride}; fmt=BGR24; sdk_ms={self.last_ms}; "
+                f"call_ms={call_ms:.1f}; elapsed_s={now - self._first_feed_at:.2f}; "
+                f"out={list(out) if status == 0 else 'not valid'}."
+            )
+            if state in ("ERROR", "OUT_OF_BOUNDS"):
+                logger.warning(message)
+            else:
+                logger.info(message)
+            self._last_transition_at = now
+            self._last_state = state
+        if now - self._last_summary_at >= 5.0:
+            self._log_summary("interval", now)
 
     def _bind_functions(self) -> None:
         integer = ctypes.c_int
@@ -125,9 +193,19 @@ class LieDetectorSdkTracker:
                 raise RuntimeError("trtyolo SDK tracker is closed")
             frame_size = (width, height)
             if self._frame_size is not None and self._frame_size != frame_size:
+                logger.info(
+                    f"[Lie Detector SDK] Input size changed: "
+                    f"{self._frame_size}->{frame_size}; resetting tracker."
+                )
                 self._reset_locked()
             self._frame_size = frame_size
             out = (ctypes.c_int * 8)()
+            if self._first_feed_at is None:
+                logger.info(
+                    f"[Lie Detector SDK] First input roi_wh=({width},{height}); "
+                    f"stride={frame.strides[0]}; fmt=BGR24; backend={self.backend}."
+                )
+            call_started = time.monotonic()
             status = self._lib.TTx_Detect(
                 self._handle,
                 ctypes.c_void_p(frame.ctypes.data),
@@ -137,9 +215,19 @@ class LieDetectorSdkTracker:
                 0,
                 out,
             )
+            completed_at = time.monotonic()
+            call_ms = (completed_at - call_started) * 1000.0
             self.last_ms = self._lib.TTx_LastMs(self._handle)
+            self._record_diagnostics(
+                status, out, width, height, frame.strides[0], call_ms, completed_at
+            )
             if status == 2:
-                raise RuntimeError(_error_text(self._lib.TTx_LastError(self._handle)))
+                reason = _error_text(self._lib.TTx_LastError(self._handle))
+                raise RuntimeError(
+                    f"SDK status=2; frame={sum(self._status_counts)}; "
+                    f"roi_wh=({width},{height}); stride={frame.strides[0]}; "
+                    f"sdk_ms={self.last_ms}; error={reason}"
+                )
             if status not in (0, 1):
                 raise RuntimeError(f"trtyolo SDK returned invalid status {status}")
 
@@ -167,6 +255,8 @@ class LieDetectorSdkTracker:
     def _reset_locked(self) -> None:
         if self._lib.TTx_Reset(self._handle) == 2:
             raise RuntimeError(_error_text(self._lib.TTx_LastError(self._handle)))
+        self._log_summary("reset", time.monotonic())
+        self._clear_diagnostics()
         self._frame_size = None
         self.last_ms = 0
 
@@ -179,6 +269,7 @@ class LieDetectorSdkTracker:
         with self._lock:
             try:
                 if self._handle:
+                    self._log_summary("close", time.monotonic())
                     self._lib.TTx_Destroy(self._handle)
             finally:
                 self._handle = None

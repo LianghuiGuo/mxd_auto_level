@@ -161,7 +161,10 @@ class LieDetectorWorker(Generic[T]):
                             self._last_fps_log_at = completed_at
                             logger.info(
                                 "[Lie Detector] Worker throughput: "
-                                f"{effective_fps:.1f}/{self.target_fps:.1f} FPS."
+                                f"{effective_fps:.1f}/{self.target_fps:.1f} FPS; "
+                                f"sequence={sequence}; "
+                                f"frame_age_ms={(completed_at - captured_at) * 1000:.1f}; "
+                                f"processing_ms={(completed_at - iteration_started) * 1000:.1f}."
                             )
             except Exception as exc:
                 # One corrupt frame or transient window failure must not kill

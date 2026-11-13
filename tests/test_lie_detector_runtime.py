@@ -99,6 +99,9 @@ class LieDetectorRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.frame = np.zeros((700, 1296, 3), dtype=np.uint8)
         self.roi = (300, 120, 600, 420)
+        image_writer = patch("src.engine.LieDetectorRuntime.cv2.imwrite", return_value=True)
+        image_writer.start()
+        self.addCleanup(image_writer.stop)
 
     def _runtime(self, presence, *, tracker=None, confirm=None, **config):
         settings = {
@@ -328,6 +331,46 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertIsNone(runtime._tracker)
         self.assertEqual(runtime.phase, PHASE_IDLE)
         self.assertIsNone(runtime._roi)
+
+    @patch("src.engine.LieDetectorRuntime.cv2.imwrite", return_value=True)
+    def test_input_snapshots_are_written_once_per_challenge(self, write_image):
+        runtime = self._runtime([True], panel_confirm_frames=1)
+        runtime.update(self.frame, 1.0)
+        runtime.update(self.frame, 2.0)
+        self.assertEqual(write_image.call_count, 3)
+        names = [Path(call.args[0]).name for call in write_image.call_args_list]
+        self.assertEqual(names, [
+            "lie_sdk_input_frame.png", "lie_sdk_input_roi.png", "lie_sdk_input_overlay.png"
+        ])
+        crop = write_image.call_args_list[1].args[1]
+        self.assertEqual(crop.shape, (420, 600, 3))
+        runtime.reset()
+        runtime.update(self.frame, 3.0)
+        self.assertEqual(write_image.call_count, 6)
+        self.assertEqual(names, [
+            Path(call.args[0]).name for call in write_image.call_args_list[3:]
+        ])
+
+    @patch("src.engine.LieDetectorRuntime.cv2.imwrite", return_value=False)
+    def test_snapshot_write_failure_does_not_block_tracking(self, write_image):
+        runtime = self._runtime([True], panel_confirm_frames=1)
+        result = runtime.update(self.frame, 1.0)
+        self.assertIsNotNone(result.target_frame)
+        self.assertEqual(write_image.call_count, 1)
+
+    @patch("src.engine.LieDetectorRuntime.logger")
+    def test_waiting_for_roi_logs_that_tracker_has_not_received_frames(self, log):
+        runtime = LieDetectorRuntime(
+            {}, panel_gate=_FakeGate([True]),
+            roi_detector=lambda _frame: None, tracker=_FakeTracker(),
+        )
+        for timestamp in (1.0, 2.0, 5.9, 6.0):
+            runtime.update(self.frame, timestamp)
+        messages = [call.args[0] for call in log.info.call_args_list]
+        waiting = [text for text in messages if "Waiting for ROI" in text]
+        self.assertEqual(len(waiting), 2)
+        self.assertIn("tracker has not received an input frame yet", waiting[0])
+        self.assertEqual(runtime._tracker.calls, 0)
 
     def test_short_panel_miss_holds_before_confirm_phase(self):
         tracker = _FakeTracker()

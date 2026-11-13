@@ -536,6 +536,8 @@ class MapleStoryAutoBot:
         self._lie_pending_pointer_target = None
         self._lie_jump_reject_streak = 0
         self._lie_active_logged = False
+        self._lie_mouse_call_logged = False
+        self._lie_last_mouse_hold_log_at = float("-inf")
         if self.lie_detector_runtime is not None:
             alert_cfg = self.cfg["lie_detector"].get("alert", {})
             self.lie_sound_alert = LocalSoundAlert(
@@ -3913,6 +3915,20 @@ class MapleStoryAutoBot:
             return
 
         target = result.target_frame
+        now = time.monotonic()
+        if result.engaged and target is None and (
+            now - self._lie_last_mouse_hold_log_at >= 5.0
+        ):
+            self._lie_last_mouse_hold_log_at = now
+            tracking = result.tracking
+            logger.info(
+                f"[Lie Detector] Mouse HOLD; phase={result.phase}; "
+                f"roi={result.panel_roi}; "
+                f"acquired={getattr(tracking, 'acquired', None)}; "
+                f"actionable={getattr(tracking, 'actionable', None)}; "
+                f"center={getattr(tracking, 'center', None)}; "
+                f"disable_control={self.is_disable_control}."
+            )
         if target is not None:
             max_jump = float(
                 self.cfg["lie_detector"].get("max_pointer_jump", 160)
@@ -3934,12 +3950,39 @@ class MapleStoryAutoBot:
                         self._lie_pending_pointer_target = target
                         self._lie_jump_reject_streak = 1
                     if self._lie_jump_reject_streak < 2:
+                        if now - self._lie_last_mouse_hold_log_at >= 5.0:
+                            self._lie_last_mouse_hold_log_at = now
+                            logger.warning(
+                                f"[Lie Detector] Mouse HOLD; reason=jump_guard; "
+                                f"previous={previous}; target={target}; "
+                                f"jump_px={jump:.1f}; max_jump={max_jump}; "
+                                f"confirmation_streak={self._lie_jump_reject_streak}."
+                            )
                         target = None
             if target is not None:
                 window_coord = self._lie_target_to_window_coord(target, title_h)
+                first_call = not self._lie_mouse_call_logged
+                if first_call:
+                    self._lie_mouse_call_logged = True
+                    logger.info(
+                        f"[Lie Detector] First mouse target; frame_target={target}; "
+                        f"window_target={window_coord}; title_h={title_h}; "
+                        f"window={self.capture.window_title!r}; "
+                        f"disable_control={self.is_disable_control}."
+                    )
                 if not self.is_disable_control:
-                    move_mouse_in_game_window(
+                    location = move_mouse_in_game_window(
                         self.capture.window_title, window_coord
+                    )
+                    if first_call:
+                        logger.info(
+                            f"[Lie Detector] Mouse move call returned; "
+                            f"requested_screen_position={location}."
+                        )
+                elif now - self._lie_last_mouse_hold_log_at >= 5.0:
+                    self._lie_last_mouse_hold_log_at = now
+                    logger.warning(
+                        "[Lie Detector] Mouse move skipped; reason=disable_control."
                     )
                 self._lie_last_pointer_target = target
                 self._lie_pending_pointer_target = None
@@ -3949,6 +3992,8 @@ class MapleStoryAutoBot:
             self._lie_last_pointer_target = None
             self._lie_pending_pointer_target = None
             self._lie_jump_reject_streak = 0
+            self._lie_mouse_call_logged = False
+            self._lie_last_mouse_hold_log_at = float("-inf")
 
     def _lie_target_to_window_coord(self, target, title_h):
         """Content-frame pixel -> window pixel (title bar included)."""

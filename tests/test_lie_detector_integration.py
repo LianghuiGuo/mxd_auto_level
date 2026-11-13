@@ -4,7 +4,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -164,6 +164,9 @@ class LieDetectorIntegrationTest(unittest.TestCase):
             confirm_click=None,
             target_frame=(640.0, 336.0),
             engaged=True,
+            phase="panel",
+            panel_roi=(400, 100, 600, 420),
+            tracking=None,
         )
         self.bot._on_lie_worker_result(SimpleNamespace(value=value))
         self.namespace["move_mouse_in_game_window"].assert_called_once_with(
@@ -196,6 +199,63 @@ class LieDetectorIntegrationTest(unittest.TestCase):
         self.keyboard.set_command.assert_called_with("none none none")
         self.keyboard.release_all_key.assert_called_once()
         self.health.disable.assert_called_once()
+
+    def _panel_snapshot(self, target=None):
+        return SimpleNamespace(value=SimpleNamespace(
+            panel_just_confirmed=False, confirm_click=None,
+            target_frame=target, engaged=True, phase="panel",
+            panel_roi=(300, 100, 600, 420),
+            tracking=SimpleNamespace(acquired=False, actionable=False, center=None),
+        ))
+
+    def test_mouse_hold_is_logged_at_most_every_five_seconds(self):
+        self.bot.start()
+        log = self.namespace["logger"]
+        log.reset_mock()
+        with patch("time.monotonic", return_value=10.0):
+            self.bot._on_lie_worker_result(self._panel_snapshot())
+            self.bot._on_lie_worker_result(self._panel_snapshot())
+        with patch("time.monotonic", return_value=15.0):
+            self.bot._on_lie_worker_result(self._panel_snapshot())
+        messages = [call.args[0] for call in log.info.call_args_list]
+        self.assertEqual(sum("Mouse HOLD" in text for text in messages), 2)
+        self.assertIn("acquired=False", messages[0])
+        self.assertIn("actionable=False", messages[0])
+        self.namespace["move_mouse_in_game_window"].assert_not_called()
+
+    def test_first_mouse_target_and_return_are_logged_once(self):
+        self.bot.start()
+        log = self.namespace["logger"]
+        log.reset_mock()
+        self.namespace["move_mouse_in_game_window"].return_value = (700, 450)
+        for _ in range(5):
+            self.bot._on_lie_worker_result(self._panel_snapshot((640.0, 336.0)))
+        messages = [call.args[0] for call in log.info.call_args_list]
+        self.assertEqual(sum("First mouse target" in text for text in messages), 1)
+        self.assertEqual(sum("Mouse move call returned" in text for text in messages), 1)
+        self.assertIn("requested_screen_position=(700, 450)", messages[-1])
+        self.assertEqual(self.namespace["move_mouse_in_game_window"].call_count, 5)
+
+    def test_disabled_control_is_logged_without_moving_mouse(self):
+        self.bot.start()
+        self.bot.is_disable_control = True
+        self.bot._on_lie_worker_result(self._panel_snapshot((640.0, 336.0)))
+        self.namespace["move_mouse_in_game_window"].assert_not_called()
+        self.assertIn(
+            "reason=disable_control",
+            self.namespace["logger"].warning.call_args.args[0],
+        )
+
+    def test_jump_guard_logs_rejected_target_without_changing_guard(self):
+        self.bot.start()
+        self.bot._lie_last_pointer_target = (100.0, 100.0)
+        self.bot._on_lie_worker_result(self._panel_snapshot((600.0, 300.0)))
+        self.namespace["move_mouse_in_game_window"].assert_not_called()
+        self.assertIn(
+            "reason=jump_guard", self.namespace["logger"].warning.call_args.args[0]
+        )
+        self.bot._on_lie_worker_result(self._panel_snapshot((600.0, 300.0)))
+        self.namespace["move_mouse_in_game_window"].assert_called_once()
 
 
 if __name__ == "__main__":
