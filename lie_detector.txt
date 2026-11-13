@@ -1,0 +1,236 @@
+﻿trtyoloLie 识别 DLL · 对接包 v220（x64）
+
+把「目标识别」做成一个 DLL：加载它、喂一帧图像、拿回目标坐标。
+不需要服务端、不开端口、不联网推理，识别核心全部在 DLL 内部。
+
+- 版本号：`TT_Version() == 220`
+- 平台：`bin64`（x64，Python / 64 位 C++ 用）
+- 推理后端：DirectML（GPU），没有可用 GPU 时自动回落 CPU
+- 一个进程可以开任意多路：每路一个句柄，状态完全独立
+
+────────────────────────────────────────────────────────
+
+1. 目录结构
+
+trtyoloLie_SDK_v220_x64\
+├─ bin64\
+│   ├─ trtyoloLie.dll                 主 DLL（已加壳保护）
+│   ├─ auth.txt                       授权服务器地址（不要删）
+│   ├─ trtyoloLie.lib                 链接用（C++）
+│   ├─ best.onnx.enc                  模型（加密）
+│   ├─ onnxruntime.dll                ONNX Runtime 1.18
+│   ├─ DirectML.dll                   GPU 后端
+│   ├─ opencv_world4100.dll
+│   └─ opencv_videoio_ffmpeg4100_64.dll
+├─ example.py                         Python 示例：单路 / 多路
+├─ example.cpp                        C++ 示例（客户端裁 ROI + 两路并发）
+└─ ttcore.h                           接口头文件
+
+────────────────────────────────────────────────────────
+
+2. 环境要求
+
+| 项目   | 要求                                                       |
+| 系统   | Windows 10 1809 及以上（DirectML 需要）                    |
+| Python | 3.8+，64 位                                                |
+| 依赖   | `pip install opencv-python numpy`                          |
+| 显卡   | 任意支持 D3D12 的 GPU；没有也能跑，自动走 CPU（慢 3~5 倍） |
+
+────────────────────────────────────────────────────────
+
+3. 三分钟跑通
+
+cd trtyoloLie_SDK_v220_x64
+pip install opencv-python numpy
+python example.py                    # 用包内 sample\clip_exact.mp4
+python example.py 你的视频.mp4        # 换自己的视频/录像
+python example.py multi              # 三路并发
+
+正常输出：
+
+[TT] model: ...\bin64\best.onnx.enc
+TT_Version = 220
+backend = DirectML
+f34  center=(637,358) 13ms
+f35  center=(637,358) 15ms
+...
+80 帧里锁定 46 帧
+
+前 30 帧左右没有坐标是正常的——跟踪器在攒入场证据。
+
+────────────────────────────────────────────────────────
+
+4. 最小调用骨架
+
+import ctypes, os, cv2
+
+BIN = r"...\trtyoloLie_SDK_v220_x64\bin64"
+os.add_dll_directory(BIN)                      # 3.8+ 必须，否则找不到依赖 dll
+lib = ctypes.WinDLL(os.path.join(BIN, "trtyoloLie.dll"))
+
+lib.TTx_Create.restype  = ctypes.c_void_p
+lib.TTx_Create.argtypes = [ctypes.c_char_p]
+lib.TTx_Detect.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                           ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                           ctypes.POINTER(ctypes.c_int)]
+
+h   = lib.TTx_Create(None)                     # None = 自动找同目录 best.onnx.enc
+out = (ctypes.c_int * 8)()
+
+frame = cv2.imread("a.png")                    # BGR 三通道
+roi   = frame[y:y+rh, x:x+rw]                  # ★ ROI 自己在客户端裁
+st = lib.TTx_Detect(h, roi.ctypes.data, roi.shape[1], roi.shape[0], 0, 0, out)
+
+if st == 0:                                    # 0 = 锁定
+    print(out[1], out[2])                      # ROI 局部坐标
+
+────────────────────────────────────────────────────────
+
+5. 接口速查
+
+5.1 核心三步
+
+| 函数                                            | 说明                                                                  |
+| `TTx_Create(model_path)`                        | 建一路，返回句柄；`NULL` = 自动在同目录找 `best.onnx.enc`；失败返回 0 |
+| `TTx_Detect(h, pixels, w, h, stride, fmt, out)` | 喂一帧，返回状态                                                      |
+| `TTx_Destroy(h)`                                | 销毁这一路                                                            |
+
+5.2 `TTx_Detect` 参数
+
+| 参数               | 说明                                                |
+| `pixels`           | 图像首地址，必须是已经裁好的 ROI 图                 |
+| `width` / `height` | 就是这张 ROI 图的宽高                               |
+| `stride`           | 每行字节数；传 `0` = 按 `width × 每像素字节` 自动算 |
+| `fmt`              | `0`=BGR24、`1`=BGRA32、`2`=GRAY8                    |
+| `out`              | 至少 8 个 `int` 的输出缓冲                          |
+
+5.3 返回值
+
+| 值  | 含义                         |
+| `0` | 锁定，`out[1..7]` 有效       |
+| `1` | 未锁定（正常，继续喂下一帧） |
+| `2` | 出错，看 `TTx_LastError(h)`  |
+
+5.4 `out` 数组
+
+| 下标                | 内容             |
+| `out[0]`            | 状态（同返回值） |
+| `out[1]` / `out[2]` | 目标中心 X / Y   |
+| `out[3]` / `out[4]` | 外框左上 X / Y   |
+| `out[5]` / `out[6]` | 外框宽 / 高      |
+| `out[7]`            | 置信度 × 1000    |
+
+坐标原点是传入那张 ROI 图的左上角，要屏幕坐标自己加偏移：
+
+screen_x = roi_x + out[1]
+screen_y = roi_y + out[2]
+
+5.5 其余常用
+
+| 函数                    | 用途                                 |
+| `TTx_Reset(h)`          | 换场景 / 传送 / 换目标后重置跟踪状态 |
+| `TTx_LastError(h)`      | 这一路最近一次错误文本（ANSI）       |
+| `TTx_LastMs(h)`         | 最近一帧耗时（毫秒）                 |
+| `TTx_Backend(h)`        | `"DirectML"` 或 `"CPU"`              |
+| `TTx_IsOpen(h)`         | 是否可用（1/0）                      |
+| `TTx_GetCenter(h, ...)` | 只取中心点，返回 1 = 拿到            |
+| `TTx_GetStats(h, out)`  | `out[0]` 已处理帧数                  |
+| `TT_Version()`          | 版本号，当前 `220`                   |
+| `TT_SetForceCpu(1)`     | 强制 CPU 推理，必须在 Create 之前调  |
+
+单实例旧接口 `TT_Init / TT_Detect / TT_Reset ...` 全部保留，内部操作一个默认实例，单路代码可直接用。
+
+5.6 两条重要约束
+
+1. ROI 由客户端裁。DLL 不裁、也不接受 ROI 参数。原因是跟踪器的绑定门按「输入图宽高比例」判断目标是否在中心区，DLL 再裁一次会让判定和坐标一起偏掉。
+2. 一个句柄 = 一条跟踪流，有状态。必须按帧率连续喂；不要在同一线程交替喂两个句柄（每路帧率砍半就锁不上）。
+
+────────────────────────────────────────────────────────
+
+6. C++ 对接
+
+cl /MT /O2 /EHsc /utf-8 /I. example.cpp /link /LIBPATH:bin64 trtyoloLie.lib
+example.exe frames.raw
+
+`frames.raw` 格式：`int32 w, int32 h, int32 count`，后面接 `count` 帧紧密排列的 BGR24。
+从视频生成：
+
+import cv2, struct
+cap = cv2.VideoCapture("sample/clip_exact.mp4")
+ok, f = cap.read(); h, w = f.shape[:2]
+buf, n = b"", 0
+while ok and n < 100:
+    buf += f.tobytes(); n += 1; ok, f = cap.read()
+open("frames.raw", "wb").write(struct.pack("<iii", w, h, n) + buf)
+
+也可以 `LoadLibrary + GetProcAddress` 动态载入，不必链 `.lib`。
+
+────────────────────────────────────────────────────────
+
+7. 授权说明（必看）
+
+7.1 第一次使用
+
+1. 直接跑一次 `python example.py`，会提示创建失败；
+2. 用下面几行取本机机器码（形如 `XXXX-XXXX-XXXX-XXXX`）；
+3. 把机器码发给作者登记到授权服务器；
+4. 登记后重新运行即可；
+
+import ctypes, os
+BIN = r"...\trtyoloLie_SDK_v220_x64\bin64"
+os.add_dll_directory(BIN)
+lib = ctypes.WinDLL(os.path.join(BIN, "trtyoloLie.dll"))
+lib.TT_MachineCode.restype = ctypes.c_char_p
+print(lib.TT_MachineCode().decode())        # XXXX-XXXX-XXXX-XXXX
+
+7.2 授权相关接口
+
+| 函数                    | 说明                                                  |
+| `TT_Auth()`             | `1` = 已授权；`0` = 未授权（原因见 `TT_AuthError()`） |
+| `TT_MachineCode()`      | 本机机器码（ASCII，静态缓冲）                         |
+| `TT_AuthError()`        | 最近一次失败原因，GBK 中文，可直接弹给用户            |
+| `TTx_LastCreateError()` | `TTx_Create` 返回 0 时的原因                          |
+
+7.3 授权配置文件
+
+授权地址写在 `trtyoloLie.dll` 同目录 的 `auth.txt` 里，内容由我方配置，请勿修改：
+
+- 必须和 DLL 放在同一目录，千万别删这个文件；
+- 删了会回落到内置默认地址，校验必然失败，`TTx_Create` 直接返回 0；
+
+7.4 授权失败怎么排查
+
+`TT_Auth()` 返回 0 时，`TT_AuthError()` 会给出中文原因
+
+| 报错               | 处理                                                           |
+| 无法连接授权服务器 | `auth.txt` 缺失、被移动，或本机网络 / 防火墙拦截了出站请求     |
+| 机器码未登记       | 把 `TT_MachineCode()` 显示的机器码发来登记，登记后重新运行即可 |
+
+────────────────────────────────────────────────────────
+
+8. 性能参考（DirectML）
+
+| ROI 尺寸   | 单帧耗时   | 理论上限    |
+| 400 × 300  | 11 ~ 14 ms | 57 ~ 70 fps |
+| 750 × 500  | 15 ~ 21 ms | 45 ~ 48 fps |
+| 1280 × 720 | 20 ~ 26 ms | 36 ~ 40 fps |
+
+- ROI 越小越快，识别够用就别框太大。
+- 锁定目标后比未锁定时慢约 5ms（跟踪链多算），正常。
+- DLL 内部没有限速，帧率只由调用节奏决定。
+
+────────────────────────────────────────────────────────
+
+9. 常见问题
+
+| 现象                                       | 原因 / 解决                                                                                                                                                                     |
+| `OSError: [WinError 126] 找不到指定的模块` | 依赖没拷全，或路径含非 ASCII。整个 `bin64` 一起拷                                                                                                                               |
+| `TTx_Create` 返回 0                        | 先看 `TTx_LastCreateError()`：报「无法连接授权服务器」= 缺 `auth.txt` 或网络不通；报「未授权 / 机器码未登记」= 把 `TT_MachineCode()` 发来登记；都不是则多为模型缺失或依赖没加载 |
+| 一直返回 1（未锁定）                       | 前 30 帧正常；一直不锁：ROI 太大导致目标占比过小、画面里没目标、或喂的不是 BGR 顺序                                                                                             |
+| 坐标总是偏                                 | 忘了加 ROI 偏移，`out[1]/out[2]` 是 ROI 局部坐标                                                                                                                                |
+| 斜纹 / 花屏                                | `stride` 传错。24 位图每行按 4 字节对齐：`stride = ((宽*3+3)/4)*4`，不是 `宽*3`                                                                                                 |
+| 多路全部锁不上                             | 两个句柄在同一线程交替喂。每路独立线程，或轮转但保证每路帧率                                                                                                                    |
+| 换场景后锁不上 / 锁到旧目标                | 调一次 `TTx_Reset(h)`                                                                                                                                                           |
+| 推理很慢（100ms+）                         | 走了 CPU。看 `TTx_Backend(h)`，检查显卡驱动、系统是否 1809+                                                                                                                     |
+
+────────────────────────────────────────────────────────
