@@ -385,32 +385,22 @@ class LieDetectorRuntime:
             )
         return self._tracker
 
-    def _save_roi_diagnostics(self, frame: np.ndarray) -> None:
-        x, y, width, height = self._roi
+    def _save_input_diagnostics(self, frame: np.ndarray) -> None:
         output = Path("log")
         write_started = time.monotonic()
         try:
             output.mkdir(exist_ok=True)
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (x, y), (x + width, y + height), (0, 255, 0), 2)
-            images = (
-                ("lie_sdk_input_frame.png", frame),
-                ("lie_sdk_input_roi.png", frame[y:y + height, x:x + width]),
-                ("lie_sdk_input_overlay.png", overlay),
-            )
-            for name, image in images:
-                path = output / name
-                if not cv2.imwrite(str(path), image, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
-                    raise OSError(f"Could not write {path}")
+            path = output / "lie_sdk_input_frame.png"
+            if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
+                raise OSError(f"Could not write {path}")
             logger.info(
-                "[Lie Detector] Input snapshots saved to "
-                "log/lie_sdk_input_{frame,roi,overlay}.png; "
-                "coordinates are title-free capture pixels; "
-                "the next challenge overwrites these files; "
+                "[Lie Detector] Full-game input snapshot saved to "
+                "log/lie_sdk_input_frame.png; coordinates are title-free capture pixels; "
+                "the next challenge overwrites this file; "
                 f"write_ms={(time.monotonic() - write_started) * 1000:.1f}."
             )
         except (OSError, cv2.error) as exc:
-            logger.warning(f"[Lie Detector] Could not save input snapshots: {exc}")
+            logger.warning(f"[Lie Detector] Could not save input snapshot: {exc}")
 
     # -- per-frame ---------------------------------------------------------
     @staticmethod
@@ -449,13 +439,14 @@ class LieDetectorRuntime:
     def _update_panel(
         self, frame_bgr: np.ndarray, timestamp: float
     ) -> LieDetectorRuntimeResult:
+        sdk_input = self.config.get("backend", "trtyolo") == "trtyolo"
         if self._panel_started_at is None:
             self._panel_started_at = timestamp
             logger.info(
                 f"[Lie Detector] Panel input detected; backend="
                 f"{self.config.get('backend', 'trtyolo')}; "
                 f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]}); "
-                f"roi_lock_samples={self.roi_lock_samples}."
+                f"input_mode={'full_game' if sdk_input else 'panel_roi'}."
             )
         self._miss_streak = 0
         self._seen_streak += 1
@@ -467,7 +458,18 @@ class LieDetectorRuntime:
         if panel_just_confirmed:
             self._panel_confirmed = True
 
-        if not self._roi_locked:
+        if sdk_input:
+            height, width = frame_bgr.shape[:2]
+            first_input = not self._roi_locked
+            self._roi = (0, 0, width, height)
+            self._roi_locked = True
+            if first_input:
+                logger.info(
+                    f"[Lie Detector] SDK input_mode=full_game; "
+                    f"frame_wh=({width},{height}); ROI detection skipped."
+                )
+                self._save_input_diagnostics(frame_bgr)
+        elif not self._roi_locked:
             roi = self.roi_detector(frame_bgr)
             if roi is not None and self._valid_roi(roi, frame_bgr):
                 self._roi_samples.append(tuple(int(value) for value in roi))
@@ -485,8 +487,6 @@ class LieDetectorRuntime:
                         f"wait_s={timestamp - self._panel_started_at:.2f}; "
                         f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]})."
                     )
-                    if self.config.get("backend", "trtyolo") == "trtyolo":
-                        self._save_roi_diagnostics(frame_bgr)
         if self._roi is None:
             if timestamp - self._last_roi_log_at >= 5.0:
                 self._last_roi_log_at = timestamp
@@ -510,7 +510,8 @@ class LieDetectorRuntime:
         x, y, width, height = self._roi
         try:
             tracking = self._ensure_tracker().update(
-                frame_bgr[y:y + height, x:x + width], timestamp
+                frame_bgr if sdk_input else frame_bgr[y:y + height, x:x + width],
+                timestamp,
             )
         except Exception as exc:
             if timestamp - self._last_tracking_error_at >= 5.0:
