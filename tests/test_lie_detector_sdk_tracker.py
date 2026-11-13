@@ -31,6 +31,9 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         self.output = [0, 30, 40, 10, 15, 40, 50, 802]
         self.last_input = None
         self.search_directory = Mock()
+        image_writer = patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=True)
+        image_writer.start()
+        self.addCleanup(image_writer.stop)
         patches = (
             patch("src.engine.LieDetectorSdkTracker.sys.platform", "win32"),
             patch("src.engine.LieDetectorSdkTracker.Path.is_file", return_value=True),
@@ -281,6 +284,58 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         result = tracker.update(np.zeros((100, 120, 3), np.uint8))
         self.assertFalse(result.actionable)
         self.assertIn("OUT_OF_BOUNDS", log.warning.call_args.args[0])
+
+    @patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=True)
+    def test_first_lock_saves_exact_frame_and_bbox_without_mutating_input(self, write):
+        tracker = self._tracker()
+        frame = np.full((100, 120, 3), 25, dtype=np.uint8)
+        original = frame.copy()
+        self.status = 1
+        tracker.update(frame, 1.0)
+        write.assert_not_called()
+        self.status = 0
+        result = tracker.update(frame, 2.0)
+        self.assertTrue(result.actionable)
+        self.assertEqual(write.call_count, 2)
+        raw_call, overlay_call = write.call_args_list
+        self.assertEqual(Path(raw_call.args[0]).name, "lie_sdk_first_lock_frame.png")
+        self.assertEqual(Path(overlay_call.args[0]).name, "lie_sdk_first_lock_overlay.png")
+        np.testing.assert_array_equal(raw_call.args[1], original)
+        np.testing.assert_array_equal(frame, original)
+        overlay = overlay_call.args[1]
+        self.assertIsNot(overlay, frame)
+        np.testing.assert_array_equal(overlay[50, 10], (0, 255, 0))
+        np.testing.assert_array_equal(overlay[40, 30], (0, 0, 255))
+        tracker.update(frame, 3.0)
+        self.assertEqual(write.call_count, 2)
+
+    @patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=True)
+    def test_reset_allows_next_challenge_to_overwrite_first_lock_snapshots(self, write):
+        tracker = self._tracker()
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+        tracker.update(frame)
+        self.status = 1
+        tracker.update(frame)
+        self.status = 0
+        tracker.update(frame)
+        self.assertEqual(write.call_count, 2)
+        first_paths = [call.args[0] for call in write.call_args_list]
+        tracker.reset()
+        tracker.update(frame)
+        self.assertEqual(write.call_count, 4)
+        self.assertEqual(first_paths, [call.args[0] for call in write.call_args_list[2:]])
+
+    @patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=False)
+    @patch("src.engine.LieDetectorSdkTracker.logger")
+    def test_snapshot_failure_preserves_tracking_and_is_not_retried_each_frame(self, log, write):
+        tracker = self._tracker()
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+        result = tracker.update(frame)
+        self.assertTrue(result.actionable)
+        self.assertEqual(result.center, (30.0, 40.0))
+        self.assertIn("Could not save first-lock snapshots", log.warning.call_args.args[0])
+        tracker.update(frame)
+        self.assertEqual(write.call_count, 1)
 
 
 if __name__ == "__main__":
