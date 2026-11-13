@@ -102,6 +102,54 @@ class LieDetectorWorkerTest(unittest.TestCase):
 
         self.assertEqual(callbacks, [])
 
+    def test_cleanup_runs_once_after_stop(self):
+        source = _LatestFrameSource()
+        processed = threading.Event()
+        cleanup = []
+
+        def process(_frame, _timestamp):
+            processed.set()
+            return "tracked"
+
+        worker = LieDetectorWorker(
+            source, process, on_stop=lambda: cleanup.append("closed")
+        )
+        worker.start()
+        try:
+            self.assertTrue(processed.wait(0.5))
+        finally:
+            worker.stop()
+        worker.stop()
+        self.assertEqual(cleanup, ["closed"])
+
+    def test_timed_out_stop_defers_cleanup_until_inflight_frame_finishes(self):
+        source = _LatestFrameSource()
+        processing = threading.Event()
+        release = threading.Event()
+        cleanup = []
+        callbacks = []
+
+        def process(_frame, _timestamp):
+            processing.set()
+            release.wait(2.0)
+            return "tracked"
+
+        worker = LieDetectorWorker(
+            source, process, on_result=callbacks.append,
+            on_stop=lambda: cleanup.append("closed"),
+        )
+        worker.start()
+        try:
+            self.assertTrue(processing.wait(0.5))
+            worker.stop(timeout=0.0)
+            self.assertTrue(worker.is_alive)
+            self.assertEqual(cleanup, [])
+        finally:
+            release.set()
+            worker.stop()
+        self.assertEqual(cleanup, ["closed"])
+        self.assertEqual(callbacks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

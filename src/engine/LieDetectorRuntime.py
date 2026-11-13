@@ -28,6 +28,10 @@ from src.engine.LieDetectorTracker import (
     LieDetectorTrackingResult,
 )
 from src.engine.LieShapeYoloDetector import LieShapeYoloDetector
+from src.engine.LieDetectorSdkTracker import (
+    DEFAULT_SDK_DIRECTORY,
+    LieDetectorSdkTracker,
+)
 from src.utils.logger import logger
 
 # The bundled title template was cut from a 1280x720 capture, so the expected
@@ -244,7 +248,7 @@ class LieDetectorRuntime:
         confirm_detector: Callable[
             [np.ndarray], Optional[tuple[float, float]]
         ] = find_success_confirm,
-        tracker: Optional[LieDetectorTracker] = None,
+        tracker: Optional[LieDetectorTracker | LieDetectorSdkTracker] = None,
     ) -> None:
         self.config = config
         self.roi_detector = roi_detector
@@ -276,6 +280,14 @@ class LieDetectorRuntime:
         self._reset_tracker()
         self._reset_state()
 
+    def close(self) -> None:
+        tracker, self._tracker = self._tracker, None
+        try:
+            if tracker is not None and hasattr(tracker, "close"):
+                tracker.close()
+        finally:
+            self._reset_state()
+
     def _reset_state(self) -> None:
         self.phase = PHASE_IDLE
         self._seen_streak = 0
@@ -289,6 +301,7 @@ class LieDetectorRuntime:
         # Sentinel so the very first sighting of the dialog clicks at once
         # instead of waiting out one click interval.
         self._last_confirm_click_at = float("-inf")
+        self._last_tracking_error_at = float("-inf")
 
     def _reset_tracker(self) -> None:
         if self._tracker is not None:
@@ -309,8 +322,17 @@ class LieDetectorRuntime:
             )
         return self._panel_gate
 
-    def _ensure_tracker(self) -> LieDetectorTracker:
+    def _ensure_tracker(self) -> LieDetectorTracker | LieDetectorSdkTracker:
         if self._tracker is None:
+            backend = self.config.get("backend", "trtyolo")
+            if backend == "trtyolo":
+                self._tracker = LieDetectorSdkTracker(
+                    self.config.get("sdk_directory", DEFAULT_SDK_DIRECTORY),
+                    force_cpu=bool(self.config.get("sdk_force_cpu", False)),
+                )
+                return self._tracker
+            if backend != "native":
+                raise ValueError(f"Unknown lie-detector backend: {backend}")
             detector = LieShapeYoloDetector(
                 Path(self.config.get("model", "models/lie_shape_yolo_manual.pt")),
                 confidence=float(self.config.get("confidence", 0.28)),
@@ -435,9 +457,21 @@ class LieDetectorRuntime:
             )
 
         x, y, width, height = self._roi
-        tracking = self._ensure_tracker().update(
-            frame_bgr[y:y + height, x:x + width], timestamp
-        )
+        try:
+            tracking = self._ensure_tracker().update(
+                frame_bgr[y:y + height, x:x + width], timestamp
+            )
+        except Exception as exc:
+            if timestamp - self._last_tracking_error_at >= 5.0:
+                self._last_tracking_error_at = timestamp
+                logger.error(f"[Lie Detector] Tracking failed; holding pointer: {exc}")
+            return LieDetectorRuntimeResult(
+                engaged=True,
+                phase=PHASE_PANEL,
+                panel_confirmed=self._panel_confirmed,
+                panel_just_confirmed=panel_just_confirmed,
+                panel_roi=self._roi,
+            )
         target = None
         if (
             self._seen_streak >= self.confirm_frames

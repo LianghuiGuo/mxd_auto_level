@@ -1,6 +1,9 @@
 # ====== macOS Configuration ======
 # The following configuration is only for macOS
 
+lie_detector:
+  backend: "native"
+
 game_window:
   size: [691, 1280]
   title_bar_height: 85         # 📐 Title Bar Height (Note titel bar will be cropped before window resize)

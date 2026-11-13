@@ -48,11 +48,13 @@ class LieDetectorWorker(Generic[T]):
         *,
         target_fps: float = 33.0,
         on_result: Optional[ResultCallback[T]] = None,
+        on_stop: Optional[Callable[[], None]] = None,
     ) -> None:
         self.frame_source = frame_source
         self.processor = processor
         self.target_fps = max(1.0, float(target_fps))
         self.on_result = on_result
+        self.on_stop = on_stop
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
@@ -109,6 +111,16 @@ class LieDetectorWorker(Generic[T]):
         return (len(self._completion_times) - 1) / max(elapsed, 1e-6)
 
     def _run(self) -> None:
+        try:
+            self._process_frames()
+        finally:
+            if self.on_stop is not None:
+                try:
+                    self.on_stop()
+                except Exception as exc:
+                    logger.error(f"[Lie Detector] Worker cleanup failed: {exc}")
+
+    def _process_frames(self) -> None:
         period = 1.0 / self.target_fps
         last_sequence: Optional[int] = None
         logger.info(

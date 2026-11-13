@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -235,6 +235,7 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         tracker = tracker_class.return_value
         runtime = LieDetectorRuntime(
             {
+                "backend": "native",
                 "identity_ranker_model": "models/lie_identity_ranker.txt",
                 "identity_ranker_min_margin": 2.0,
                 "multi_hypothesis_identity": True,
@@ -268,6 +269,65 @@ class LieDetectorRuntimeTest(unittest.TestCase):
             flow_association=True,
             flow_coast=True,
         )
+
+    @patch("src.engine.LieDetectorRuntime.LieShapeYoloDetector")
+    @patch("src.engine.LieDetectorRuntime.LieDetectorSdkTracker")
+    def test_sdk_is_default_and_does_not_load_native_detector(
+        self, sdk_class, detector_class
+    ):
+        runtime = LieDetectorRuntime({})
+        self.assertIs(runtime._ensure_tracker(), sdk_class.return_value)
+        sdk_class.assert_called_once_with(
+            "trtyoloLie_SDK_v220_x64/bin64", force_cpu=False
+        )
+        detector_class.assert_not_called()
+
+    @patch("src.engine.LieDetectorRuntime.LieDetectorSdkTracker")
+    def test_sdk_configuration_is_forwarded(self, sdk_class):
+        runtime = LieDetectorRuntime({
+            "backend": "trtyolo",
+            "sdk_directory": "vendor/bin64",
+            "sdk_force_cpu": True,
+        })
+        runtime._ensure_tracker()
+        sdk_class.assert_called_once_with("vendor/bin64", force_cpu=True)
+
+    @patch("src.engine.LieDetectorRuntime.LieShapeYoloDetector")
+    @patch("src.engine.LieDetectorRuntime.LieDetectorSdkTracker")
+    def test_sdk_creation_failure_does_not_fall_back(self, sdk_class, detector_class):
+        sdk_class.side_effect = RuntimeError("not authorized")
+        runtime = LieDetectorRuntime({"backend": "trtyolo"})
+        with self.assertRaisesRegex(RuntimeError, "not authorized"):
+            runtime._ensure_tracker()
+        detector_class.assert_not_called()
+
+    def test_unknown_backend_is_rejected(self):
+        runtime = LieDetectorRuntime({"backend": "typo"})
+        with self.assertRaisesRegex(ValueError, "Unknown lie-detector backend"):
+            runtime._ensure_tracker()
+
+    def test_tracking_failure_publishes_hold_instead_of_stale_target(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime([True], tracker=tracker, panel_confirm_frames=1)
+        self.assertIsNotNone(runtime.update(self.frame, 1.0).target_frame)
+        tracker.update = Mock(side_effect=RuntimeError("SDK frame failed"))
+        result = runtime.update(self.frame, 2.0)
+        self.assertTrue(result.engaged)
+        self.assertEqual(result.panel_roi, self.roi)
+        self.assertIsNone(result.tracking)
+        self.assertIsNone(result.target_frame)
+
+    def test_close_releases_tracker_once_and_clears_runtime_state(self):
+        tracker = _FakeTracker()
+        tracker.close = Mock()
+        runtime = self._runtime([True], tracker=tracker, panel_confirm_frames=1)
+        runtime.update(self.frame, 1.0)
+        runtime.close()
+        runtime.close()
+        tracker.close.assert_called_once()
+        self.assertIsNone(runtime._tracker)
+        self.assertEqual(runtime.phase, PHASE_IDLE)
+        self.assertIsNone(runtime._roi)
 
     def test_short_panel_miss_holds_before_confirm_phase(self):
         tracker = _FakeTracker()

@@ -428,6 +428,9 @@ lie_detector:
   # pointer only while the tracked REAL shape is safe/actionable, then click
   # the 确认 button of the success dialog once the panel closes.
   enabled: true
+  backend: "trtyolo"  # Options: "trtyolo" "native"
+  sdk_directory: "trtyoloLie_SDK_v220_x64/bin64"
+  sdk_force_cpu: false
   model: "models/lie_shape_yolo_manual.pt"
   confidence: 0.28
   image_size: 768

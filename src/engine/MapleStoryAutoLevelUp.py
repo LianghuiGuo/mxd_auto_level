@@ -277,6 +277,9 @@ class MapleStoryAutoBot:
         '''
         lie_cfg = cfg.setdefault("lie_detector", {})
         lie_cfg.setdefault("enabled", True)
+        lie_cfg.setdefault("backend", "native" if is_mac() else "trtyolo")
+        lie_cfg.setdefault("sdk_directory", "trtyoloLie_SDK_v220_x64/bin64")
+        lie_cfg.setdefault("sdk_force_cpu", False)
         lie_cfg.setdefault("model", "models/lie_shape_yolo_manual.pt")
         lie_cfg.setdefault("confidence", 0.28)
         lie_cfg.setdefault("image_size", 768)
@@ -474,17 +477,30 @@ class MapleStoryAutoBot:
         return 0 # load successfully
 
     def start(self):
-        '''
-        Start all threads
-        '''
+        try:
+            self._start_threads()
+        except Exception:
+            self.terminate_threads(finalize_recording=False)
+            raise
+
+    def _start_threads(self):
+        if self.lie_detector_worker is not None:
+            self.lie_detector_worker.stop()
+            if self.lie_detector_worker.is_alive:
+                raise RuntimeError("Previous lie-detector worker is still stopping")
+            self.lie_detector_worker = None
+        if self.lie_detector_runtime is not None:
+            self.lie_detector_runtime.close()
+        self.lie_detector_runtime = None
+        self.lie_sound_alert = None
+        if bool(self.cfg.get("lie_detector", {}).get("enabled", True)):
+            self.lie_detector_runtime = LieDetectorRuntime(self.cfg["lie_detector"])
+            self.lie_detector_runtime.warm_up()
         self.is_terminated = False
 
-        # Start keyboard controller thread
         self.kb = KeyBoardController(self.cfg)
         if self.is_disable_control:
-            self.kb.disable() # Disable keyboard controller for debugging
-
-        # Start game window capturing thread
+            self.kb.disable()
         if self.args.test_image == '':
             self.capture = GameWindowCapturor(self.cfg)
         else:
@@ -515,52 +531,35 @@ class MapleStoryAutoBot:
             except Exception:
                 pass
 
-        self.lie_detector_runtime = None
         self.lie_detector_worker = None
-        self.lie_sound_alert = None
         self._lie_last_pointer_target = None
         self._lie_pending_pointer_target = None
         self._lie_jump_reject_streak = 0
         self._lie_active_logged = False
-        if bool(self.cfg.get("lie_detector", {}).get("enabled", True)):
-            try:
-                alert_cfg = self.cfg["lie_detector"].get("alert", {})
-                self.lie_sound_alert = LocalSoundAlert(
-                    enabled=bool(
-                        alert_cfg.get("enabled", True)
-                        and alert_cfg.get("sound", True)
-                    ),
-                    repeat=alert_cfg.get("sound_repeat", 2),
-                    interval_seconds=alert_cfg.get(
-                        "sound_interval_seconds", 0.18
-                    ),
-                    sound_file=str(alert_cfg.get("sound_file", "") or ""),
-                )
-                self.lie_detector_runtime = LieDetectorRuntime(
-                    self.cfg["lie_detector"]
-                )
-                self.lie_detector_runtime.warm_up()
-                self.lie_detector_worker = LieDetectorWorker(
-                    self._lie_worker_frame_source,
-                    self.lie_detector_runtime.update,
-                    target_fps=float(
-                        self.cfg["lie_detector"].get("processing_fps", 33)
-                    ),
-                    on_result=self._on_lie_worker_result,
-                )
-                self.lie_detector_worker.start()
-                logger.info(
-                    "[Lie Detector] Mouse-follow runtime ready on dedicated worker."
-                )
-            except Exception as exc:
-                if self.lie_detector_worker is not None:
-                    self.lie_detector_worker.stop()
-                self.lie_detector_worker = None
-                self.lie_detector_runtime = None
-                logger.error(
-                    "[Lie Detector] Disabled because initialization failed: "
-                    f"{exc}"
-                )
+        if self.lie_detector_runtime is not None:
+            alert_cfg = self.cfg["lie_detector"].get("alert", {})
+            self.lie_sound_alert = LocalSoundAlert(
+                enabled=bool(
+                    alert_cfg.get("enabled", True)
+                    and alert_cfg.get("sound", True)
+                ),
+                repeat=alert_cfg.get("sound_repeat", 2),
+                interval_seconds=alert_cfg.get("sound_interval_seconds", 0.18),
+                sound_file=str(alert_cfg.get("sound_file", "") or ""),
+            )
+            self.lie_detector_worker = LieDetectorWorker(
+                self._lie_worker_frame_source,
+                self.lie_detector_runtime.update,
+                target_fps=float(
+                    self.cfg["lie_detector"].get("processing_fps", 33)
+                ),
+                on_result=self._on_lie_worker_result,
+                on_stop=self.lie_detector_runtime.close,
+            )
+            self.lie_detector_worker.start()
+            logger.info(
+                "[Lie Detector] Mouse-follow runtime ready on dedicated worker."
+            )
 
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, self.kb)
@@ -3095,13 +3094,16 @@ class MapleStoryAutoBot:
         # Finalise an active recording on application shutdown.  F1 pause opts
         # out because its UI record button remains checked and recording is
         # expected to resume with the bot.
+        self.is_terminated = True
         if finalize_recording:
             self.stop_record()
-        # Stop the detector before closing its capture source. This also waits
-        # for any in-flight tracker update / mouse callback to finish.
+        # Native handles must outlive any in-flight worker frame.
         if self.lie_detector_worker is not None:
             self.lie_detector_worker.stop()
-            self.lie_detector_worker = None
+            if not self.lie_detector_worker.is_alive:
+                self.lie_detector_worker = None
+        if self.lie_detector_worker is None and self.lie_detector_runtime is not None:
+            self.lie_detector_runtime.close()
         # Terminate keyboard controller
         if self.kb is not None:
             self.kb.is_terminated = True
