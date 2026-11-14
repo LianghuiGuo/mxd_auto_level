@@ -14,6 +14,8 @@ import numpy as np
 from src.engine.LieDetectorTracker import LieDetectorTrackingResult
 from src.utils.logger import logger
 
+logger = logger.for_category("lie_detector")
+
 DEFAULT_SDK_DIRECTORY = "trtyoloLie_SDK_v220_x64/bin64"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 

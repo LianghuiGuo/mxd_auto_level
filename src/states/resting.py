@@ -4,6 +4,8 @@ from src.input.KeyBoardController import get_last_backend_info, press_key
 from src.states.base_state import State
 from src.utils.logger import logger
 
+logger = logger.for_category("chair_rest")
+
 
 class RestingState(State):
     """Stop completely, sit with safe retries, then rest without blocking."""

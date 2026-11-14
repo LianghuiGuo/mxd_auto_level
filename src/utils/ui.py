@@ -149,15 +149,15 @@ class SingleKeyEdit(QKeySequenceEdit):
         name = seq.toString(QKeySequence.NativeText).strip().lower()
         return self._KEY_NAME_ALIASES.get(name, name)
 
-class QtLogHandler(logging.Handler, QObject):
-    '''
-    QtLogHandler
-    '''
-    log_signal = Signal(str, int)  # message, level
+class _QtLogSignals(QObject):
+    log_signal = Signal(str, int)
 
+
+class QtLogHandler(logging.Handler):
     def __init__(self):
-        logging.Handler.__init__(self)
-        QObject.__init__(self)
+        super().__init__()
+        self._signals = _QtLogSignals()
+        self.log_signal = self._signals.log_signal
 
     def emit(self, record):
         msg = self.format(record)
@@ -173,6 +173,32 @@ def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None
 
     def get_comment(path):
         # Nested blocks inherit the comment attached to their parent YAML key.
+        if title == "logging" and len(path) > 1:
+            return {
+                "lie_detector": "测谎 SDK、跟随和提醒日志",
+                "monsters": "怪物 YOLO 和攻击检测日志",
+                "player": "玩家定位日志",
+                "minimap": "小地图定位和诊断日志",
+                "input": "键鼠操作和输入后端日志",
+                "input_heartbeat": "键盘输入状态心跳日志",
+                "buff": "Buff 日志",
+                "route": "路线导航日志",
+                "fsm": "状态机日志",
+                "chair_rest": "休息和坐椅日志",
+                "watchdog": "卡住、攻击超时日志",
+                "health": "HP、MP、EXP 和自动恢复日志",
+                "rune": "符文检测和处理日志",
+                "capture": "窗口、截图采集和分辨率日志",
+                "recording": "录像和截图保存日志",
+                "performance": "性能统计日志",
+                "channel": "换频道日志",
+                "party": "组队日志",
+                "email": "邮件日志",
+                "config": "配置读写日志",
+                "resources": "图片和资源加载日志",
+                "ui": "界面日志",
+                "general": "启动、停止和其他通用日志",
+            }.get(path[-1], "")
         key = path[0]
         if comments and title in comments and key in comments[title]:
             return comments[title][key]
@@ -183,6 +209,8 @@ def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None
         for part in path[:-1]:
             target = target[part]
         target[path[-1]] = value
+        if title == "logging":
+            logger.configure(cfg[title])
 
     def add_field(path, value):
         key = ".".join(path)

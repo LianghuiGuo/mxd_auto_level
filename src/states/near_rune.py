@@ -5,6 +5,8 @@ from src.states.base_state import State
 from src.utils.logger import logger
 from src.input.KeyBoardController import press_key
 
+logger = logger.for_category("rune")
+
 class NearRuneState(State):
     def __init__(self, name, bot):
         super().__init__(name, bot)

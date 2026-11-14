@@ -14,6 +14,8 @@ from src.utils.logger import logger
 from src.utils.common import get_bar_percent
 from src.input.KeyBoardController import press_key
 
+logger = logger.for_category("health")
+
 class HealthMonitor:
     '''
     Independent health monitoring thread that can heal while other actions are running

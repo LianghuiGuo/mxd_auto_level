@@ -11,6 +11,8 @@ from pynput import keyboard
 # Local import
 from src.utils.logger import logger
 
+logger = logger.for_category("input")
+
 class KeyBoardListener():
     '''
     KeyBoardListener

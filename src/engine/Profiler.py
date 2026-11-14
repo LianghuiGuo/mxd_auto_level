@@ -4,6 +4,8 @@ from collections import defaultdict
 # Local improt
 from src.utils.logger import logger
 
+logger = logger.for_category("performance")
+
 class Profiler:
     '''
     Profiler

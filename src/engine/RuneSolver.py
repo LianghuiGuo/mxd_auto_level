@@ -16,6 +16,8 @@ from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot,
 )
 from src.input.KeyBoardController import press_key
 
+logger = logger.for_category("rune")
+
 class RuneSolver:
     '''
     Init RuneSolver

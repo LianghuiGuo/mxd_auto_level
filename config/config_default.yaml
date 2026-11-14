@@ -3,6 +3,40 @@
 # Put your own setting in config_edit_me.yaml instead.
 # --------------------------------------
 
+logging:
+  # Application logs only; SDK/OpenCV native output is not controlled here.
+  enabled: true
+  level: "INFO"  # Options: "DEBUG" "INFO" "WARNING" "ERROR" "CRITICAL"
+  console: true
+  ui: true
+  file: true
+  # Keep warnings/errors even when their category is off; master/channel switches still apply.
+  keep_warnings_errors: true
+  categories:
+    lie_detector: true
+    monsters: true
+    player: true
+    minimap: true
+    input: true
+    input_heartbeat: true
+    buff: true
+    route: true
+    fsm: true
+    chair_rest: true
+    watchdog: true
+    health: true
+    rune: true
+    capture: true
+    recording: true
+    performance: true
+    channel: true
+    party: true
+    email: true
+    config: true
+    resources: true
+    ui: true
+    general: true
+
 bot:
   # 🔁 Bot Settings
   mode: "normal"        # Options: "normal" "aux" "patrol"

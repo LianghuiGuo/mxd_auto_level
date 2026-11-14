@@ -275,6 +275,10 @@ class MapleStoryAutoBot:
         '''
         load_config
         '''
+        log_cfg = dict(cfg.get("logging", {}))
+        if self.args.debug:
+            log_cfg["level"] = "DEBUG"
+        logger.configure(log_cfg)
         lie_cfg = cfg.setdefault("lie_detector", {})
         lie_cfg.setdefault("enabled", True)
         lie_cfg.setdefault("backend", "native" if is_mac() else "trtyolo")
@@ -304,7 +308,8 @@ class MapleStoryAutoBot:
         alert_cfg = lie_cfg.setdefault("alert", {})
         if not isinstance(alert_cfg, dict):
             logger.warning(
-                "[Lie Detector] Invalid alert config; using local sound defaults."
+                "[Lie Detector] Invalid alert config; using local sound defaults.",
+                category="lie_detector",
             )
             alert_cfg = {}
             lie_cfg["alert"] = alert_cfg
@@ -336,7 +341,8 @@ class MapleStoryAutoBot:
                 logger.error(
                     "[Chair Rest] Invalid configuration: rounds_before_rest "
                     "and sit_retry_count must be integers; duration_minutes, "
-                    "settle_seconds and sit_retry_interval must be numeric."
+                    "settle_seconds and sit_retry_interval must be numeric.",
+                    category="chair_rest",
                 )
                 return -1
             if rounds_before_rest <= 0 or duration_minutes <= 0 or not chair_key \
@@ -345,7 +351,8 @@ class MapleStoryAutoBot:
                 logger.error(
                     "[Chair Rest] Invalid configuration: round/duration/retry "
                     "count and key must be positive/non-empty; settle and "
-                    "retry interval cannot be negative."
+                    "retry interval cannot be negative.",
+                    category="chair_rest",
                 )
                 return -1
             rest_cfg["rounds_before_rest"] = rounds_before_rest
@@ -356,7 +363,8 @@ class MapleStoryAutoBot:
             if cfg["bot"]["mode"] != "normal":
                 logger.warning(
                     "[Chair Rest] enabled=true is ignored outside normal mode "
-                    "because patrol/aux modes have no complete route round."
+                    "because patrol/aux modes have no complete route round.",
+                    category="chair_rest",
                 )
 
         # Parse color code in config
@@ -411,10 +419,10 @@ class MapleStoryAutoBot:
                 if imgs:
                     self.monsters_info[monster_name] = imgs
                 else:
-                    logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
+                    logger.error(f"No images found in monster/{monster_name}/{monster_name}*", category="resources")
                     return -1
                     # raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
-            logger.info(f"Loaded monsters: {list(self.monsters_info.keys())}")
+            logger.info(f"Loaded monsters: {list(self.monsters_info.keys())}", category="resources")
 
         # Re-resolve nametag template at every load_config call (the UI
         # triggers this every time the user saves changes in the Advanced
@@ -560,7 +568,8 @@ class MapleStoryAutoBot:
             )
             self.lie_detector_worker.start()
             logger.info(
-                "[Lie Detector] Mouse-follow runtime ready on dedicated worker."
+                "[Lie Detector] Mouse-follow runtime ready on dedicated worker.",
+                category="lie_detector",
             )
 
         # Start health monitoring thread
@@ -3847,13 +3856,15 @@ class MapleStoryAutoBot:
             target_rounds = int(rest_cfg.get("rounds_before_rest", 10))
             logger.info(
                 f"[Chair Rest] Completed route round "
-                f"{self._chair_rest_rounds}/{target_rounds}."
+                f"{self._chair_rest_rounds}/{target_rounds}.",
+                category="chair_rest",
             )
             if self._chair_rest_rounds >= target_rounds:
                 self._chair_rest_pending = True
                 logger.info(
                     "[Chair Rest] Round target reached; rest will start "
-                    "after any active rune handling finishes."
+                    "after any active rune handling finishes.",
+                    category="chair_rest",
                 )
 
         return completed_round
@@ -4215,7 +4226,8 @@ class MapleStoryAutoBot:
                     "Activating game window and retrying next frame. "
                     "HINT: if this repeats, the game window was minimised / "
                     "switched to another desktop / the capture thread died — "
-                    "restore the game window to its normal 16:9 size."
+                    "restore the game window to its normal 16:9 size.",
+                    category="capture",
                 )
             if not is_mac():
                 activate_game_window(self.capture.window_title)
@@ -4316,7 +4328,7 @@ class MapleStoryAutoBot:
                 # Unable to get minimap for 30 seconds -> assume it's login screen
                 loc_login_button = self.get_login_button_location()
                 if loc_login_button:
-                    logger.info("Found login button on screen. Proceed to login.")
+                    logger.info("Found login button on screen. Proceed to login.", category="capture")
                     click_in_game_window(self.capture.window_title,
                                          loc_login_button)
                     time.sleep(3)
@@ -4402,7 +4414,7 @@ class MapleStoryAutoBot:
                     f"[minimap-dot] found={_found} dot={loc_player_minimap} "
                     f"minimap_wh={_mm_wh} player_color="
                     f"{self.cfg['minimap']['player_color']} "
-                    f"last_good_dot={self.loc_player_minimap}")
+                    f"last_good_dot={self.loc_player_minimap}", category="minimap")
         except Exception:
             pass
 
@@ -4433,21 +4445,24 @@ class MapleStoryAutoBot:
                     "red-bar or nametag template matched your client).  The "
                     "bot should now move but hunting accuracy will be "
                     "reduced.  Fix: make a nametag template for your "
-                    "character's name (see usage notes)."
+                    "character's name (see usage notes).",
+                    category="player",
                 )
             elif method_used in ("nametag", "nametag_auto_fallback", "nametag_sticky"):
                 logger.info(
                     f"[Player Location] Using nametag detection "
-                    f"({method_used})."
+                    f"({method_used}).",
+                    category="player",
                 )
             elif method_used == "party_red_bar":
-                logger.info("[Player Location] Using party red-bar detection.")
+                logger.info("[Player Location] Using party red-bar detection.", category="player")
             else:
                 logger.warning(
                     f"[Player Location] All detection stages failed "
                     f"(method={method_used}); keeping last known position.  "
                     "Stuck watchdog will keep firing until at least one "
-                    "stage succeeds."
+                    "stage succeeds.",
+                    category="player",
                 )
 
         # Update player location
@@ -4526,19 +4541,19 @@ class MapleStoryAutoBot:
         dt = time.time() - self.t_last_attack
         if not is_chair_resting and self.cfg['bot']['mode'] == 'normal' and \
             dt > self.cfg["watchdog"]["last_attack_timeout"]:
-            logger.info(f"[Attack Timeout] Last attack timeout for {round(dt, 2)} seconds")
+            logger.info(f"[Attack Timeout] Last attack timeout for {round(dt, 2)} seconds", category="watchdog")
             cfg_action = self.cfg["watchdog"]["last_attack_timeout_action"]
             if cfg_action == "change_channel":
-                logger.info("[Attack Timeout] Change channel!")
+                logger.info("[Attack Timeout] Change channel!", category="watchdog")
                 self.channel_change()
             elif cfg_action == "go_home":
-                logger.info("[Attack Timeout] Return home!")
+                logger.info("[Attack Timeout] Return home!", category="watchdog")
                 press_key(self.cfg["key"]["return_home"])
                 # Terminate Autobot
                 self.is_terminated = True
                 self.kb.is_terminated = True
             else:
-                logger.info(f"Unsupported timeout mode: {cfg_action}")
+                logger.info(f"Unsupported timeout mode: {cfg_action}", category="watchdog")
 
         self.profiler.mark("Attack WatchDog")
 
@@ -4567,7 +4582,7 @@ class MapleStoryAutoBot:
                     self.update_cmd_by_mob_detection()
                 self._mob_detection_ran_this_frame = True
             except Exception as _e_mob:
-                logger.warning(f"[run_once] update_cmd_by_mob_detection raised: {_e_mob}")
+                logger.warning(f"[run_once] update_cmd_by_mob_detection raised: {_e_mob}", category="monsters")
                 self._mob_detection_ran_this_frame = False
 
         # Also paint the debug viz layer (DETECT[...] line, monster boxes,
@@ -4576,7 +4591,7 @@ class MapleStoryAutoBot:
         try:
             self.update_info_on_img_frame_debug()
         except Exception as _e_dbg:
-            logger.warning(f"[run_once] update_info_on_img_frame_debug raised: {_e_dbg}")
+            logger.warning(f"[run_once] update_info_on_img_frame_debug raised: {_e_dbg}", category="ui")
 
         #####################
         ### Debug Windows ###
@@ -4613,7 +4628,7 @@ class MapleStoryAutoBot:
             # Print profiler result
             if self.cfg["profiler"]["enable"] and \
                 self.profiler.total_frames % self.cfg["profiler"]["print_frequency"] == 0:
-                logger.info('\n' + self.profiler.report())
+                logger.info('\n' + self.profiler.report(), category="performance")
 
         return 0 # frame done
 
@@ -4693,7 +4708,8 @@ class MapleStoryAutoBot:
                         "'[run_once] get_img_frame returned None ...' line "
                         "(= game window minimised / capture died) or a "
                         "'[run_once] Unhandled exception' traceback "
-                        "(= a code error inside the frame handler)."
+                        "(= a code error inside the frame handler).",
+                        category="capture",
                     )
                 try:
                     _loop_cls._loop_last_ret_was_skip = True

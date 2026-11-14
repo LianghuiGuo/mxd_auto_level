@@ -79,6 +79,7 @@ class PatrolState(State):
         self._jump_ref_time = now
         try:
             from src.utils.logger import logger
+            logger = logger.for_category("fsm")
             logger.info(
                 f"[Patrol] auto-jump: blocked walking {walk_dir} "
                 f"(x moved={moved:.1f} <= {stuck_dist} over "
@@ -101,6 +102,7 @@ class PatrolState(State):
         # 1 Hz heartbeat
         try:
             from src.utils.logger import logger
+            logger = logger.for_category("fsm")
             _now = time.time()
             _last = getattr(type(self), "_last_on_frame_log", -999.0)
             if _now - _last >= 1.0:

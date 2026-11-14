@@ -13,6 +13,8 @@ from typing import Callable, Optional
 
 from src.utils.logger import logger
 
+logger = logger.for_category("lie_detector")
+
 
 class LocalSoundAlert:
     """Play a best-effort warning sound without blocking the bot loop.

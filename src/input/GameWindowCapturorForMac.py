@@ -11,6 +11,8 @@ import Quartz
 # Local import
 from src.utils.logger import logger
 
+logger = logger.for_category("capture")
+
 def get_window_title(token):
     '''
     Get window title that contain token

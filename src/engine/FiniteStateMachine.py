@@ -4,6 +4,8 @@ import time
 from src.states.base_state import State
 from src.utils.logger import logger
 
+logger = logger.for_category("fsm")
+
 class FiniteStateMachine:
     '''
     Finite State Machine

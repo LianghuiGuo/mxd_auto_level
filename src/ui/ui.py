@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
             self.cfg_base = override_cfg(self.cfg_base,
                                          load_yaml("config/config_macOS.yaml"))
         self.cfg = copy.deepcopy(self.cfg_base)
+        logger.configure(self.cfg.get("logging", {}))
         self.path_cfg_custom = "config/config_custom.yaml" # Custom config path
 
         # Load database
@@ -748,6 +749,7 @@ class MainWindow(QMainWindow):
 
         # Advance settings
         self.update_advance_setting_ui_from_cfg()
+        logger.configure(self.cfg.get("logging", {}))
 
     def set_gbox_enabled(self, enabled: bool):
         gray_style = "color: lightgray;" if not enabled else ""
@@ -760,6 +762,8 @@ class MainWindow(QMainWindow):
         gboxs += list(self.advance_settings_gboxes.values())
         # Apply disable + style
         for gbox in gboxs:
+            if gbox is self.advance_settings_gboxes.get("logging"):
+                continue
             gbox.setEnabled(enabled)
             if hasattr(gbox, "setStyleSheet"):
                 gbox.setStyleSheet(gray_style)

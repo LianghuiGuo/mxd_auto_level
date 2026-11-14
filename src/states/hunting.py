@@ -8,6 +8,7 @@ class HuntingState(State):
         # before logging.
         try:
             from src.utils.logger import logger
+            logger = logger.for_category("fsm")
             logger.info("[FSM] HuntingState.on_enter")
         except Exception:
             pass
@@ -38,6 +39,7 @@ class HuntingState(State):
         # emitted by KeyBoardController.
         try:
             from src.utils.logger import logger
+            logger = logger.for_category("fsm")
             _now = time.time()
             _last = getattr(type(self), "_last_on_frame_log", -999.0)
             if _now - _last >= 1.0:

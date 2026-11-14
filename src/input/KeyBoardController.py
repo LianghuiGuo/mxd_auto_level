@@ -17,6 +17,8 @@ from src.utils.logger import logger
 from src.utils.common import is_mac
 from src.input.CommandMailbox import CommandMailbox
 
+logger = logger.for_category("input")
+
 if is_mac():
     import Quartz
 else:
@@ -2353,7 +2355,7 @@ class KeyBoardController():
                 if time.time() - self.t_last_buff_cast[i] >= cooldown and \
                     time.time() - self.t_last_skill > self.cfg["buff_skill"]["action_cooldown"]:
                     do_action_key("buff", buff_skill_key)
-                    logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)")
+                    logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)", category="buff")
                     # Reset timers
                     self.t_last_buff_cast[i] = time.time()
                     self.t_last_skill = time.time()
@@ -2755,7 +2757,8 @@ class KeyBoardController():
                     f"focus={is_act} foreground={fg_title!r} "
                     f"backend={backend} conseq_fail={consec} "
                     f"{nt_str} {gas_str} {gas_map} "
-                    f"{vgp_str}"
+                    f"{vgp_str}",
+                    category="input_heartbeat",
                 )
                 # ----------------------------------------------------------
                 # Once-per-startup "every backend is failing" warning.

@@ -1,6 +1,9 @@
 # Standard Import
 import sys
 import os
+import yaml
+
+from src.utils.logger import logger
 
 # Pyside
 from PySide6.QtWidgets import QApplication
@@ -40,7 +43,11 @@ def _qt_message_handler(msg_type, context, message):
     #   0=Debug, 1=Info, 2=Warning, 3=Critical, 4=Fatal
     numeric = int(msg_type) if hasattr(msg_type, "__int__") else -1
     level_prefix = {0: "D", 1: "I", 2: "W", 3: "C", 4: "F"}.get(numeric, "?")
-    print(f"[Qt{level_prefix}] {msg}", file=sys.stderr)
+    emit = {
+        0: logger.debug, 1: logger.warning, 2: logger.error,
+        3: logger.error, 4: logger.info,
+    }.get(numeric, logger.warning)
+    emit(f"[Qt{level_prefix}] {msg}", category="ui")
 
 
 def main():
@@ -48,6 +55,8 @@ def main():
     Main Function
     Run: python -m src.main
     '''
+    with open("config/config_default.yaml", encoding="utf-8") as config_file:
+        logger.configure(yaml.safe_load(config_file).get("logging", {}))
     # Install the handler BEFORE creating QApplication, so Qt's very first
     # messages (including the DPI one during platform plugin init) are filtered.
     qInstallMessageHandler(_qt_message_handler)

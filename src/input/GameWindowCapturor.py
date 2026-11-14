@@ -14,6 +14,8 @@ import cv2
 from src.utils.logger import logger
 from src.utils.common import get_game_window_title_by_token, load_image, resize_window
 
+logger = logger.for_category("capture")
+
 class GameWindowCapturor:
     '''
     GameWindowCapturor

@@ -35,6 +35,8 @@ from src.engine.LieDetectorSdkTracker import (
 )
 from src.utils.logger import logger
 
+logger = logger.for_category("lie_detector")
+
 # The bundled title template was cut from a 1280x720 capture, so the expected
 # scale for any other frame follows that reference.
 _TEMPLATE_REFERENCE_SIZE = (1280, 720)
