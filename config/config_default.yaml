@@ -465,6 +465,8 @@ lie_detector:
   backend: "trtyolo"  # Options: "trtyolo" "native"
   sdk_directory: "trtyoloLie_SDK_v220_x64/bin64"
   sdk_force_cpu: false
+  # Fixed x, y, width, height in the title-free capture; no automatic scaling.
+  sdk_roi: [290, 81, 702, 468]
   model: "models/lie_shape_yolo_manual.pt"
   confidence: 0.28
   image_size: 768
@@ -503,7 +505,7 @@ lie_detector:
   panel_check_interval_seconds: 0.2
   # Consecutive failed checks, not processed frames; keep tracking until this threshold.
   panel_miss_frames: 3
-  # Native backend only; the SDK receives the complete title-free game frame.
+  # Native backend only; the SDK uses sdk_roi without automatic ROI detection.
   roi_lock_samples: 3
   # Dedicated capture/tracking worker target. Actual throughput is reported in
   # logs and still depends on detector latency and available CPU/GPU.

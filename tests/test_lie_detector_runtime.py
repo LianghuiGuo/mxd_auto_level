@@ -101,7 +101,7 @@ class LieDetectorRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.frame = np.zeros((700, 1296, 3), dtype=np.uint8)
         self.roi = (300, 120, 600, 420)
-        image_writer = patch("src.engine.LieDetectorRuntime.cv2.imwrite", return_value=True)
+        image_writer = patch("src.engine.LieDetectorRuntime.save_input_snapshot")
         image_writer.start()
         self.addCleanup(image_writer.stop)
 
@@ -278,27 +278,33 @@ class LieDetectorRuntimeTest(unittest.TestCase):
             flow_coast=True,
         )
 
-    def test_sdk_receives_full_frame_immediately_without_roi_detection(self):
+    def test_sdk_receives_fixed_roi_immediately_without_detection(self):
         tracker = _FakeTracker()
         tracker.update = Mock(wraps=tracker.update)
+        gate = _FakeGate([True])
+        gate.present = Mock(wraps=gate.present)
         roi_detector = Mock(side_effect=AssertionError("ROI detector must not run"))
         runtime = LieDetectorRuntime(
             {"backend": "trtyolo", "roi_lock_samples": 99},
-            panel_gate=_FakeGate([True]), roi_detector=roi_detector, tracker=tracker,
+            panel_gate=gate, roi_detector=roi_detector, tracker=tracker,
         )
+        self.frame[81:549, 290:992] = (10, 20, 30)
         first = runtime.update(self.frame, 1.0)
         self.assertTrue(first.engaged)
         self.assertIsNone(first.target_frame)
-        self.assertEqual(first.panel_roi, (0, 0, 1296, 700))
-        self.assertIs(tracker.update.call_args.args[0], self.frame)
+        self.assertEqual(first.panel_roi, (290, 81, 702, 468))
+        sdk_frame = tracker.update.call_args.args[0]
+        self.assertEqual(sdk_frame.shape, (468, 702, 3))
+        np.testing.assert_array_equal(sdk_frame, self.frame[81:549, 290:992])
+        self.assertIs(gate.present.call_args.args[0], self.frame)
         self.assertEqual(tracker.update.call_args.args[1], 1.0)
         self.assertEqual(runtime._roi_samples, [])
         roi_detector.assert_not_called()
         second = runtime.update(self.frame, 2.0)
-        self.assertEqual(second.target_frame, (30.0, 40.0))
+        self.assertEqual(second.target_frame, (320.0, 121.0))
         self.assertEqual(tracker.calls, 2)
 
-    def test_sdk_full_frame_extent_follows_capture_size_changes(self):
+    def test_sdk_fixed_roi_is_not_scaled_when_capture_size_changes(self):
         tracker = _FakeTracker()
         tracker.update = Mock(wraps=tracker.update)
         runtime = self._runtime(
@@ -307,11 +313,11 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         runtime.update(self.frame, 1.0)
         resized = np.zeros((1080, 1920, 3), dtype=np.uint8)
         result = runtime.update(resized, 2.0)
-        self.assertEqual(result.panel_roi, (0, 0, 1920, 1080))
-        self.assertEqual(result.target_frame, (30.0, 40.0))
-        self.assertIs(tracker.update.call_args.args[0], resized)
+        self.assertEqual(result.panel_roi, (290, 81, 702, 468))
+        self.assertEqual(result.target_frame, (320.0, 121.0))
+        self.assertEqual(tracker.update.call_args.args[0].shape, (468, 702, 3))
 
-    def test_sdk_full_frame_input_still_requires_panel_presence(self):
+    def test_sdk_fixed_roi_still_requires_panel_presence(self):
         tracker = _FakeTracker()
         runtime = self._runtime([False], tracker=tracker, backend="trtyolo")
         result = runtime.update(self.frame, 1.0)
@@ -319,14 +325,14 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertEqual(tracker.calls, 0)
         self.assertIsNone(result.panel_roi)
 
-    def test_sdk_full_frame_state_is_reset_when_panel_disappears(self):
+    def test_sdk_fixed_roi_state_is_reset_when_panel_disappears(self):
         tracker = _FakeTracker()
         runtime = self._runtime(
             [True, False], tracker=tracker, backend="trtyolo",
             panel_confirm_frames=1, panel_miss_frames=1,
         )
         first = runtime.update(self.frame, 1.0)
-        self.assertEqual(first.target_frame, (30.0, 40.0))
+        self.assertEqual(first.target_frame, (320.0, 121.0))
         result = runtime.update(self.frame, 2.0)
         self.assertEqual(result.phase, PHASE_CONFIRM)
         self.assertIsNone(result.target_frame)
@@ -364,6 +370,53 @@ class LieDetectorRuntimeTest(unittest.TestCase):
             runtime._ensure_tracker()
         detector_class.assert_not_called()
 
+    def test_sdk_custom_fixed_roi_is_cropped_without_resizing(self):
+        tracker = _FakeTracker()
+        tracker.update = Mock(wraps=tracker.update)
+        runtime = self._runtime(
+            [True], tracker=tracker, backend="trtyolo", panel_confirm_frames=1,
+            sdk_roi=[200, 100, 400, 300],
+        )
+        result = runtime.update(self.frame, 1.0)
+        self.assertEqual(result.panel_roi, (200, 100, 400, 300))
+        self.assertEqual(result.target_frame, (230.0, 140.0))
+        self.assertEqual(tracker.update.call_args.args[0].shape, (300, 400, 3))
+
+    def test_fixed_roi_local_center_is_offset_once(self):
+        tracker = _FakeTracker()
+        tracker.update = Mock(return_value=SimpleNamespace(actionable=True, center=(350.0, 235.0)))
+        runtime = self._runtime([True], tracker=tracker, backend="trtyolo", panel_confirm_frames=1)
+        result = runtime.update(self.frame, 1.0)
+        self.assertEqual(result.tracking.center, (350.0, 235.0))
+        self.assertEqual(result.target_frame, (640.0, 316.0))
+        self.assertEqual(result.panel_roi, (290, 81, 702, 468))
+
+    def test_invalid_fixed_roi_configuration_is_rejected(self):
+        for roi in ([1, 2, 3], [-1, 81, 702, 468], [290, 81, 0, 468], [290, 81, 702.5, 468]):
+            with self.subTest(roi=roi):
+                with self.assertRaisesRegex(ValueError, "sdk_roi"):
+                    LieDetectorRuntime({"backend": "trtyolo", "sdk_roi": roi})
+
+    def test_fixed_roi_outside_frame_does_not_call_sdk(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime([True], tracker=tracker, backend="trtyolo", panel_confirm_frames=1)
+        for frame in (np.zeros((500, 1282, 3), np.uint8), np.zeros((693, 900, 3), np.uint8)):
+            with self.subTest(shape=frame.shape):
+                result = runtime.update(frame, 1.0)
+                self.assertTrue(result.engaged)
+                self.assertIsNone(result.target_frame)
+                self.assertIsNone(result.tracking)
+        self.assertEqual(tracker.calls, 0)
+
+    def test_fixed_roi_at_frame_boundary_is_not_truncated(self):
+        tracker = _FakeTracker()
+        tracker.update = Mock(wraps=tracker.update)
+        runtime = self._runtime([True], tracker=tracker, backend="trtyolo", panel_confirm_frames=1)
+        frame = np.zeros((549, 992, 3), np.uint8)
+        result = runtime.update(frame, 1.0)
+        self.assertEqual(result.target_frame, (320.0, 121.0))
+        self.assertEqual(tracker.update.call_args.args[0].shape, (468, 702, 3))
+
     def test_unknown_backend_is_rejected(self):
         runtime = LieDetectorRuntime({"backend": "typo"})
         with self.assertRaisesRegex(ValueError, "Unknown lie-detector backend"):
@@ -392,25 +445,25 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.phase, PHASE_IDLE)
         self.assertIsNone(runtime._roi)
 
-    @patch("src.engine.LieDetectorRuntime.cv2.imwrite", return_value=True)
-    def test_full_input_snapshot_is_written_once_per_challenge(self, write_image):
+    @patch("src.engine.LieDetectorRuntime.save_input_snapshot")
+    def test_fixed_input_snapshot_is_queued_once_per_challenge(self, save_image):
         runtime = self._runtime([True], backend="trtyolo", panel_confirm_frames=1)
         runtime.update(self.frame, 1.0)
         runtime.update(self.frame, 2.0)
-        self.assertEqual(write_image.call_count, 1)
-        self.assertEqual(Path(write_image.call_args.args[0]).name, "lie_sdk_input_frame.png")
-        self.assertIs(write_image.call_args.args[1], self.frame)
+        save_image.assert_called_once()
+        self.assertEqual(save_image.call_args.args[0].shape, (468, 702, 3))
+        np.testing.assert_array_equal(save_image.call_args.args[0], self.frame[81:549, 290:992])
         runtime.reset()
         runtime.update(self.frame, 3.0)
-        self.assertEqual(write_image.call_count, 2)
-        self.assertEqual(Path(write_image.call_args.args[0]).name, "lie_sdk_input_frame.png")
+        self.assertEqual(save_image.call_count, 2)
+        self.assertEqual(save_image.call_args.args[0].shape, (468, 702, 3))
 
-    @patch("src.engine.LieDetectorRuntime.cv2.imwrite", return_value=False)
-    def test_snapshot_write_failure_does_not_block_tracking(self, write_image):
+    @patch("src.engine.LieDetectorRuntime.save_input_snapshot", return_value=None)
+    def test_full_save_queue_does_not_block_tracking(self, save_image):
         runtime = self._runtime([True], backend="trtyolo", panel_confirm_frames=1)
         result = runtime.update(self.frame, 1.0)
         self.assertIsNotNone(result.target_frame)
-        self.assertEqual(write_image.call_count, 1)
+        self.assertEqual(save_image.call_count, 1)
 
     @patch("src.engine.LieDetectorRuntime.logger")
     def test_waiting_for_roi_logs_that_tracker_has_not_received_frames(self, log):
@@ -520,8 +573,8 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         runtime.update(self.frame, 0.01)
         for timestamp in (0.25, 0.30, 0.50):
             result = runtime.update(self.frame, timestamp)
-            self.assertEqual(result.panel_roi, (0, 0, 1296, 700))
-            self.assertEqual(result.target_frame, (30.0, 40.0))
+            self.assertEqual(result.panel_roi, (290, 81, 702, 468))
+            self.assertEqual(result.target_frame, (320.0, 121.0))
         self.assertEqual(tracker.calls, 5)
         self.assertEqual(tracker.resets, 0)
 
@@ -548,7 +601,7 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         resized = np.zeros((1080, 1920, 3), np.uint8)
         result = runtime.update(resized, 0.05)
         self.assertEqual(runtime._panel_gate.calls, 2)
-        self.assertEqual(result.panel_roi, (0, 0, 1920, 1080))
+        self.assertEqual(result.panel_roi, (290, 81, 702, 468))
         self.assertIsNotNone(result.target_frame)
 
     @patch("src.engine.LieDetectorRuntime.logger")
@@ -565,6 +618,15 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertIn("checks=1", diagnostics[0])
         self.assertIn("miss_streak=1/3", diagnostics[0])
         self.assertIn("avg_check_ms=", diagnostics[0])
+
+    def test_sdk_mouse_diagnostics_are_forwarded_without_native_calls(self):
+        tracker = _FakeTracker()
+        tracker.record_mouse_action = Mock()
+        runtime = self._runtime([True], backend="trtyolo", tracker=tracker)
+        runtime.record_mouse_action(1.0, "move_requested", (700, 450), 1.5, 1.2)
+        tracker.record_mouse_action.assert_called_once_with(1.0, "move_requested", (700, 450), 1.5, 1.2)
+        native = self._runtime([True], backend="native", tracker=_FakeTracker())
+        native.record_mouse_action(1.0, "no_target", None, None, 1.2)
 
     def test_short_panel_miss_holds_before_confirm_phase(self):
         tracker = _FakeTracker()

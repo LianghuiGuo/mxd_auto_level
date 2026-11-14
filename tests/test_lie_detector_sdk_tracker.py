@@ -31,9 +31,12 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         self.output = [0, 30, 40, 10, 15, 40, 50, 802]
         self.last_input = None
         self.search_directory = Mock()
-        image_writer = patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=True)
-        image_writer.start()
-        self.addCleanup(image_writer.stop)
+        first_lock_writer = patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot")
+        first_lock_writer.start()
+        self.addCleanup(first_lock_writer.stop)
+        trace_writer = patch("src.engine.LieDetectorSdkTracker.save_recent_trace")
+        trace_writer.start()
+        self.addCleanup(trace_writer.stop)
         patches = (
             patch("src.engine.LieDetectorSdkTracker.sys.platform", "win32"),
             patch("src.engine.LieDetectorSdkTracker.Path.is_file", return_value=True),
@@ -285,32 +288,29 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         self.assertFalse(result.actionable)
         self.assertIn("OUT_OF_BOUNDS", log.warning.call_args.args[0])
 
-    @patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=True)
-    def test_first_lock_saves_exact_frame_and_bbox_without_mutating_input(self, write):
+    @patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot")
+    def test_first_lock_queues_frame_and_raw_bbox_without_mutating_input(self, save):
         tracker = self._tracker()
         frame = np.full((100, 120, 3), 25, dtype=np.uint8)
         original = frame.copy()
         self.status = 1
         tracker.update(frame, 1.0)
-        write.assert_not_called()
+        save.assert_not_called()
         self.status = 0
         result = tracker.update(frame, 2.0)
         self.assertTrue(result.actionable)
-        self.assertEqual(write.call_count, 2)
-        raw_call, overlay_call = write.call_args_list
-        self.assertEqual(Path(raw_call.args[0]).name, "lie_sdk_first_lock_frame.png")
-        self.assertEqual(Path(overlay_call.args[0]).name, "lie_sdk_first_lock_overlay.png")
-        np.testing.assert_array_equal(raw_call.args[1], original)
+        save.assert_called_once()
+        saved_frame, record = save.call_args.args
+        np.testing.assert_array_equal(saved_frame, original)
         np.testing.assert_array_equal(frame, original)
-        overlay = overlay_call.args[1]
-        self.assertIsNot(overlay, frame)
-        np.testing.assert_array_equal(overlay[50, 10], (0, 255, 0))
-        np.testing.assert_array_equal(overlay[40, 30], (0, 0, 255))
+        self.assertEqual((record["bbox_x"], record["bbox_y"], record["bbox_width"], record["bbox_height"]), (10, 15, 40, 50))
+        self.assertEqual(record["center_x"], 30)
+        self.assertEqual(record["captured_at"], 2.0)
         tracker.update(frame, 3.0)
-        self.assertEqual(write.call_count, 2)
+        save.assert_called_once()
 
-    @patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=True)
-    def test_reset_allows_next_challenge_to_overwrite_first_lock_snapshots(self, write):
+    @patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot")
+    def test_reset_allows_next_challenge_to_save_first_lock_again(self, save):
         tracker = self._tracker()
         frame = np.zeros((100, 120, 3), dtype=np.uint8)
         tracker.update(frame)
@@ -318,24 +318,61 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         tracker.update(frame)
         self.status = 0
         tracker.update(frame)
-        self.assertEqual(write.call_count, 2)
-        first_paths = [call.args[0] for call in write.call_args_list]
+        self.assertEqual(save.call_count, 1)
         tracker.reset()
         tracker.update(frame)
-        self.assertEqual(write.call_count, 4)
-        self.assertEqual(first_paths, [call.args[0] for call in write.call_args_list[2:]])
+        self.assertEqual(save.call_count, 2)
 
-    @patch("src.engine.LieDetectorSdkTracker.cv2.imwrite", return_value=False)
-    @patch("src.engine.LieDetectorSdkTracker.logger")
-    def test_snapshot_failure_preserves_tracking_and_is_not_retried_each_frame(self, log, write):
+    @patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot", return_value=None)
+    def test_full_save_queue_preserves_tracking_and_does_not_retry_each_frame(self, save):
         tracker = self._tracker()
         frame = np.zeros((100, 120, 3), dtype=np.uint8)
         result = tracker.update(frame)
         self.assertTrue(result.actionable)
         self.assertEqual(result.center, (30.0, 40.0))
-        self.assertIn("Could not save first-lock snapshots", log.warning.call_args.args[0])
         tracker.update(frame)
-        self.assertEqual(write.call_count, 1)
+        save.assert_called_once()
+
+    @patch("src.engine.LieDetectorSdkTracker.save_recent_trace")
+    def test_recent_trace_is_time_bounded_sampled_and_saved_on_close(self, save):
+        tracker = self._tracker()
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+        for index in range(61):
+            tracker.update(frame, index * 0.1)
+        self.assertLessEqual(len(tracker._recent_records), 21)
+        self.assertLessEqual(len(tracker._recent_frames), 11)
+        self.assertGreaterEqual(tracker._recent_records[0]["captured_at"], 4.0)
+        save.assert_not_called()
+        tracker.close()
+        save.assert_called_once()
+        records, frames, reason = save.call_args.args
+        self.assertEqual(reason, "close")
+        self.assertEqual(records[-1]["frame"], 61)
+        self.assertEqual(records[-1]["confidence"], 0.802)
+        self.assertEqual(records[-1]["center_x"], 30)
+        self.assertAlmostEqual(records[-1]["source_gap_ms"], 100.0)
+        self.assertEqual(frames[-1][1].shape, frame.shape)
+
+    def test_recent_mouse_action_is_attached_to_the_matching_sdk_frame(self):
+        tracker = self._tracker()
+        tracker.update(np.zeros((100, 120, 3), np.uint8), 5.0)
+        tracker.record_mouse_action(5.0, "move_requested", (700, 450), 1.5, 5.2)
+        record = tracker._recent_records[-1]
+        self.assertEqual(record["mouse_action"], "move_requested")
+        self.assertEqual((record["requested_x"], record["requested_y"]), (700, 450))
+        self.assertEqual(record["mouse_call_ms"], 1.5)
+        self.assertAlmostEqual(record["action_frame_age_ms"], 200.0)
+        tracker.record_mouse_action(4.0, "no_target", None, None, 5.3)
+        self.assertEqual(record["mouse_action"], "move_requested")
+
+    @patch("src.engine.LieDetectorSdkTracker.save_recent_trace")
+    def test_reset_saves_and_clears_recent_trace(self, save):
+        tracker = self._tracker()
+        tracker.update(np.zeros((100, 120, 3), np.uint8), 1.0)
+        tracker.reset()
+        self.assertEqual(save.call_args.args[2], "reset")
+        self.assertEqual(len(tracker._recent_records), 0)
+        self.assertEqual(len(tracker._recent_frames), 0)
 
 
 if __name__ == "__main__":

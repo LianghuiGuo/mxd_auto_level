@@ -257,6 +257,38 @@ class LieDetectorIntegrationTest(unittest.TestCase):
         self.bot._on_lie_worker_result(self._panel_snapshot((600.0, 300.0)))
         self.namespace["move_mouse_in_game_window"].assert_called_once()
 
+    def test_mouse_request_diagnostics_include_location_and_source_timestamp(self):
+        self.bot.start()
+        self.namespace["move_mouse_in_game_window"].return_value = (700, 450)
+        snapshot = self._panel_snapshot((640.0, 336.0))
+        snapshot.captured_at = time.monotonic()
+        self.bot._on_lie_worker_result(snapshot)
+        timestamp, action, location, call_ms, completed_at = self.runtime.record_mouse_action.call_args.args
+        self.assertEqual(timestamp, snapshot.captured_at)
+        self.assertEqual(action, "move_requested")
+        self.assertEqual(location, (700, 450))
+        self.assertGreaterEqual(call_ms, 0.0)
+        self.assertGreaterEqual(completed_at, timestamp)
+
+    def test_jump_rejection_is_recorded_in_recent_diagnostics(self):
+        self.bot.start()
+        self.bot._lie_last_pointer_target = (100.0, 100.0)
+        snapshot = self._panel_snapshot((600.0, 300.0))
+        snapshot.captured_at = time.monotonic()
+        self.bot._on_lie_worker_result(snapshot)
+        self.assertEqual(self.runtime.record_mouse_action.call_args.args[1], "jump_guard")
+        self.assertIsNone(self.runtime.record_mouse_action.call_args.args[2])
+        self.namespace["move_mouse_in_game_window"].assert_not_called()
+
+    def test_mouse_failure_is_recorded_and_still_raised(self):
+        self.bot.start()
+        snapshot = self._panel_snapshot((640.0, 336.0))
+        snapshot.captured_at = time.monotonic()
+        self.namespace["move_mouse_in_game_window"].side_effect = RuntimeError("mouse failed")
+        with self.assertRaisesRegex(RuntimeError, "mouse failed"):
+            self.bot._on_lie_worker_result(snapshot)
+        self.assertEqual(self.runtime.record_mouse_action.call_args.args[1], "move_error")
+
 
 if __name__ == "__main__":
     unittest.main()

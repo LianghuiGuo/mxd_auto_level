@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import ctypes
 import os
 from pathlib import Path
@@ -8,9 +9,9 @@ import threading
 import time
 from typing import Optional
 
-import cv2
 import numpy as np
 
+from src.engine.LieDetectorDiagnostics import save_first_lock_snapshot, save_recent_trace
 from src.engine.LieDetectorTracker import LieDetectorTrackingResult
 from src.utils.logger import logger
 
@@ -98,6 +99,9 @@ class LieDetectorSdkTracker:
         self._last_transition_at = float("-inf")
         self._first_lock_frame = None
         self._notready_streak = 0
+        self._recent_records = deque(maxlen=256)
+        self._recent_frames = deque(maxlen=11)
+        self._last_frame_sample_at = float("-inf")
 
     def _log_summary(self, reason: str, now: float) -> None:
         frames = sum(self._status_counts)
@@ -152,43 +156,68 @@ class LieDetectorSdkTracker:
         if now - self._last_summary_at >= 5.0:
             self._log_summary("interval", now)
 
-    def _save_first_lock_diagnostics(
-        self, frame: np.ndarray, out, timestamp: Optional[float]
-    ) -> None:
-        output = Path("log")
-        write_started = time.monotonic()
-        try:
-            output.mkdir(exist_ok=True)
-            overlay = frame.copy()
-            cx, cy, x, y, width, height = (int(value) for value in out[1:7])
-            cv2.rectangle(overlay, (x, y), (x + width, y + height), (0, 255, 0), 2)
-            cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), 2)
-            cv2.drawMarker(overlay, (cx, cy), (0, 0, 255), cv2.MARKER_CROSS, 18, 2)
-            cv2.putText(
-                overlay,
-                f"SDK LOCKED frame={self._first_lock_frame} "
-                f"conf={out[7] / 1000.0:.3f} sdk_ms={self.last_ms}",
-                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
+    def _record_recent_frame(self, frame, out, status, timestamp, completed_at, call_ms):
+        valid = status == 0
+        previous = self._recent_records[-1] if self._recent_records else None
+        captured_at = float(timestamp) if timestamp is not None else completed_at
+        record = {
+            "frame": sum(self._status_counts),
+            "captured_at": captured_at,
+            "processed_at": completed_at,
+            "source_gap_ms": (captured_at - previous["captured_at"]) * 1000 if previous else None,
+            "status": status,
+            "center_x": int(out[1]) if valid else None,
+            "center_y": int(out[2]) if valid else None,
+            "bbox_x": int(out[3]) if valid else None,
+            "bbox_y": int(out[4]) if valid else None,
+            "bbox_width": int(out[5]) if valid else None,
+            "bbox_height": int(out[6]) if valid else None,
+            "confidence": out[7] / 1000.0 if valid else 0.0,
+            "sdk_ms": self.last_ms,
+            "call_ms": call_ms,
+            "frame_age_ms": (completed_at - captured_at) * 1000 if timestamp is not None else None,
+            "backend": self.backend,
+            "input_width": frame.shape[1],
+            "input_height": frame.shape[0],
+            "mouse_action": "no_callback",
+            "requested_x": None,
+            "requested_y": None,
+            "mouse_call_ms": None,
+            "action_completed_at": None,
+            "action_frame_age_ms": None,
+        }
+        self._recent_records.append(record)
+        cutoff = captured_at - 2.0
+        while self._recent_records and self._recent_records[0]["captured_at"] < cutoff:
+            self._recent_records.popleft()
+        while self._recent_frames and self._recent_frames[0][1] < cutoff:
+            self._recent_frames.popleft()
+        if captured_at - self._last_frame_sample_at >= 0.2:
+            self._recent_frames.append((record["frame"], captured_at, frame.copy()))
+            self._last_frame_sample_at = captured_at
+        return record
+
+    def record_mouse_action(self, timestamp, action, location, call_ms, completed_at):
+        with self._lock:
+            if not self._recent_records:
+                return
+            record = self._recent_records[-1]
+            if timestamp is None or timestamp != record["captured_at"]:
+                return
+            record.update(
+                mouse_action=action,
+                requested_x=location[0] if location is not None else None,
+                requested_y=location[1] if location is not None else None,
+                mouse_call_ms=call_ms,
+                action_completed_at=completed_at,
+                action_frame_age_ms=(completed_at - timestamp) * 1000,
             )
-            for name, image in (
-                ("lie_sdk_first_lock_frame.png", frame),
-                ("lie_sdk_first_lock_overlay.png", overlay),
-            ):
-                path = output / name
-                if not cv2.imwrite(str(path), image, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
-                    raise OSError(f"Could not write {path}")
-            logger.info(
-                "[Lie Detector SDK] First-lock snapshots saved to "
-                "log/lie_sdk_first_lock_{frame,overlay}.png; "
-                f"frame={self._first_lock_frame}; captured_at={timestamp}; "
-                f"center=({cx},{cy}); bbox=({x},{y},{width},{height}); "
-                "coordinates are SDK input pixels; "
-                "green=SDK bbox, red=SDK center; "
-                "the next challenge overwrites these files; "
-                f"write_ms={(time.monotonic() - write_started) * 1000:.1f}."
-            )
-        except (OSError, cv2.error) as exc:
-            logger.warning(f"[Lie Detector SDK] Could not save first-lock snapshots: {exc}")
+
+    def _save_recent_trace(self, reason):
+        if self._recent_records:
+            first = self._recent_records[0]["frame"]
+            frames = [(number, frame) for number, _timestamp, frame in self._recent_frames if number >= first]
+            save_recent_trace(list(self._recent_records), frames, reason)
 
     def _bind_functions(self) -> None:
         integer = ctypes.c_int
@@ -263,8 +292,9 @@ class LieDetectorSdkTracker:
             self._record_diagnostics(
                 status, out, width, height, frame.strides[0], call_ms, completed_at
             )
+            record = self._record_recent_frame(frame, out, status, timestamp, completed_at, call_ms)
             if first_lock:
-                self._save_first_lock_diagnostics(frame, out, timestamp)
+                save_first_lock_snapshot(frame, record)
             if status == 2:
                 reason = _error_text(self._lib.TTx_LastError(self._handle))
                 raise RuntimeError(
@@ -300,6 +330,7 @@ class LieDetectorSdkTracker:
         if self._lib.TTx_Reset(self._handle) == 2:
             raise RuntimeError(_error_text(self._lib.TTx_LastError(self._handle)))
         self._log_summary("reset", time.monotonic())
+        self._save_recent_trace("reset")
         self._clear_diagnostics()
         self._frame_size = None
         self.last_ms = 0
@@ -314,11 +345,14 @@ class LieDetectorSdkTracker:
             try:
                 if self._handle:
                     self._log_summary("close", time.monotonic())
+                    self._save_recent_trace("close")
                     self._lib.TTx_Destroy(self._handle)
             finally:
                 self._handle = None
                 self._lib = None
                 self._frame_size = None
+                self._recent_records.clear()
+                self._recent_frames.clear()
                 if self._dll_directory is not None:
                     self._dll_directory.close()
                     self._dll_directory = None

@@ -29,6 +29,7 @@ class AdvancedSettingsNestedConfigTest(unittest.TestCase):
         self.cfg = {
             "lie_detector": {
                 "enabled": True,
+                "sdk_roi": [290, 81, 702, 468],
                 "alert": {
                     "enabled": True,
                     "sound": True,
@@ -85,6 +86,15 @@ class AdvancedSettingsNestedConfigTest(unittest.TestCase):
             refs["alert.sound_interval_seconds"].text(), "0.4"
         )
         self.assertEqual(refs["alert.sound_file"].text(), r"C:\alert.wav")
+
+    def test_sdk_roi_fields_are_editable_and_refreshable(self):
+        refs = self.gbox._field_refs["sdk_roi"]
+        self.assertEqual([field.text() for field in refs], ["290", "81", "702", "468"])
+        refs[0].setText("300")
+        refs[1].setText("90")
+        self.assertEqual(self.cfg["lie_detector"]["sdk_roi"], [300, 90, 702, 468])
+        update_advance_setting_gbox(self.gbox, {"sdk_roi": [290, 81, 702, 468]})
+        self.assertEqual([field.text() for field in refs], ["290", "81", "702", "468"])
 
     def test_arbitrary_mapping_remains_hidden(self):
         cfg = {

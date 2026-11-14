@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 from ml.detect_lie_panels import detect_frame
+from src.engine.LieDetectorDiagnostics import save_input_snapshot
 from src.engine.LieDetectorTracker import (
     LieDetectorTracker,
     LieDetectorTrackingResult,
@@ -43,6 +44,7 @@ _TEMPLATE_REFERENCE_SIZE = (1280, 720)
 _TEMPLATE_SCALE_TRIALS = (0.92, 1.0, 1.08)
 # Title text lives in the upper part of the panel; skip the rest of the frame.
 _TITLE_SEARCH_HEIGHT_RATIO = 0.55
+DEFAULT_SDK_ROI = (290, 81, 702, 468)
 
 PHASE_IDLE = "idle"
 PHASE_PANEL = "panel"
@@ -297,6 +299,14 @@ class LieDetectorRuntime:
             config.get("confirm_click_interval", 0.8)
         )
         self.confirm_max_clicks = max(1, int(config.get("confirm_max_clicks", 6)))
+        self.sdk_roi = tuple(config.get("sdk_roi", DEFAULT_SDK_ROI))
+        if (
+            len(self.sdk_roi) != 4
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in self.sdk_roi)
+            or self.sdk_roi[0] < 0 or self.sdk_roi[1] < 0
+            or self.sdk_roi[2] <= 0 or self.sdk_roi[3] <= 0
+        ):
+            raise ValueError("sdk_roi must contain integer x, y, width, height with positive dimensions")
         self._panel_gate = panel_gate
         self._tracker = tracker
         self._reset_state()
@@ -422,21 +432,11 @@ class LieDetectorRuntime:
         return self._tracker
 
     def _save_input_diagnostics(self, frame: np.ndarray) -> None:
-        output = Path("log")
-        write_started = time.monotonic()
-        try:
-            output.mkdir(exist_ok=True)
-            path = output / "lie_sdk_input_frame.png"
-            if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
-                raise OSError(f"Could not write {path}")
-            logger.info(
-                "[Lie Detector] Full-game input snapshot saved to "
-                "log/lie_sdk_input_frame.png; coordinates are title-free capture pixels; "
-                "the next challenge overwrites this file; "
-                f"write_ms={(time.monotonic() - write_started) * 1000:.1f}."
-            )
-        except (OSError, cv2.error) as exc:
-            logger.warning(f"[Lie Detector] Could not save input snapshot: {exc}")
+        save_input_snapshot(frame)
+
+    def record_mouse_action(self, timestamp, action, location, call_ms, completed_at):
+        if self.config.get("backend", "trtyolo") == "trtyolo" and self._tracker is not None:
+            self._tracker.record_mouse_action(timestamp, action, location, call_ms, completed_at)
 
     # -- per-frame ---------------------------------------------------------
     @staticmethod
@@ -518,7 +518,7 @@ class LieDetectorRuntime:
                 f"[Lie Detector] Panel input detected; backend="
                 f"{self.config.get('backend', 'trtyolo')}; "
                 f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]}); "
-                f"input_mode={'full_game' if sdk_input else 'panel_roi'}."
+                f"input_mode={'fixed_roi' if sdk_input else 'panel_roi'}."
             )
         self.phase = PHASE_PANEL
         panel_just_confirmed = bool(
@@ -529,16 +529,30 @@ class LieDetectorRuntime:
             self._panel_confirmed = True
 
         if sdk_input:
-            height, width = frame_bgr.shape[:2]
+            x, y, width, height = self.sdk_roi
+            if x + width > frame_bgr.shape[1] or y + height > frame_bgr.shape[0]:
+                if timestamp - self._last_tracking_error_at >= 5.0:
+                    self._last_tracking_error_at = timestamp
+                    logger.error(
+                        f"[Lie Detector] Fixed SDK ROI {self.sdk_roi} is outside "
+                        f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]}); "
+                        "holding pointer without calling SDK."
+                    )
+                return LieDetectorRuntimeResult(
+                    engaged=True, phase=PHASE_PANEL,
+                    panel_confirmed=self._panel_confirmed,
+                    panel_just_confirmed=panel_just_confirmed,
+                )
             first_input = not self._roi_locked
-            self._roi = (0, 0, width, height)
+            self._roi = self.sdk_roi
             self._roi_locked = True
             if first_input:
                 logger.info(
-                    f"[Lie Detector] SDK input_mode=full_game; "
-                    f"frame_wh=({width},{height}); ROI detection skipped."
+                    f"[Lie Detector] SDK input_mode=fixed_roi; roi={self._roi}; "
+                    f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]}); "
+                    "ROI detection skipped; coordinates are title-free capture pixels."
                 )
-                self._save_input_diagnostics(frame_bgr)
+                self._save_input_diagnostics(frame_bgr[y:y + height, x:x + width])
         elif not self._roi_locked:
             roi = self.roi_detector(frame_bgr)
             if roi is not None and self._valid_roi(roi, frame_bgr):
@@ -580,7 +594,7 @@ class LieDetectorRuntime:
         x, y, width, height = self._roi
         try:
             tracking = self._ensure_tracker().update(
-                frame_bgr if sdk_input else frame_bgr[y:y + height, x:x + width],
+                frame_bgr[y:y + height, x:x + width],
                 timestamp,
             )
         except Exception as exc:

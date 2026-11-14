@@ -284,6 +284,7 @@ class MapleStoryAutoBot:
         lie_cfg.setdefault("backend", "native" if is_mac() else "trtyolo")
         lie_cfg.setdefault("sdk_directory", "trtyoloLie_SDK_v220_x64/bin64")
         lie_cfg.setdefault("sdk_force_cpu", False)
+        lie_cfg.setdefault("sdk_roi", (290, 81, 702, 468))
         lie_cfg.setdefault("model", "models/lie_shape_yolo_manual.pt")
         lie_cfg.setdefault("confidence", 0.28)
         lie_cfg.setdefault("image_size", 768)
@@ -3928,6 +3929,9 @@ class MapleStoryAutoBot:
 
         target = result.target_frame
         now = time.monotonic()
+        mouse_action = "no_target"
+        location = None
+        mouse_call_ms = None
         if result.engaged and target is None and (
             now - self._lie_last_mouse_hold_log_at >= 5.0
         ):
@@ -3970,6 +3974,7 @@ class MapleStoryAutoBot:
                                 f"jump_px={jump:.1f}; max_jump={max_jump}; "
                                 f"confirmation_streak={self._lie_jump_reject_streak}."
                             )
+                        mouse_action = "jump_guard"
                         target = None
             if target is not None:
                 window_coord = self._lie_target_to_window_coord(target, title_h)
@@ -3983,9 +3988,20 @@ class MapleStoryAutoBot:
                         f"disable_control={self.is_disable_control}."
                     )
                 if not self.is_disable_control:
-                    location = move_mouse_in_game_window(
-                        self.capture.window_title, window_coord
-                    )
+                    mouse_started = time.monotonic()
+                    try:
+                        location = move_mouse_in_game_window(
+                            self.capture.window_title, window_coord
+                        )
+                    except Exception:
+                        completed_at = time.monotonic()
+                        self.lie_detector_runtime.record_mouse_action(
+                            getattr(snapshot, "captured_at", None), "move_error", None,
+                            (completed_at - mouse_started) * 1000, completed_at,
+                        )
+                        raise
+                    mouse_call_ms = (time.monotonic() - mouse_started) * 1000
+                    mouse_action = "move_requested"
                     if first_call:
                         logger.info(
                             f"[Lie Detector] Mouse move call returned; "
@@ -3996,10 +4012,17 @@ class MapleStoryAutoBot:
                     logger.warning(
                         "[Lie Detector] Mouse move skipped; reason=disable_control."
                     )
+                if self.is_disable_control:
+                    mouse_action = "disable_control"
                 self._lie_last_pointer_target = target
                 self._lie_pending_pointer_target = None
                 self._lie_jump_reject_streak = 0
 
+        if result.engaged:
+            self.lie_detector_runtime.record_mouse_action(
+                getattr(snapshot, "captured_at", None), mouse_action, location,
+                mouse_call_ms, time.monotonic(),
+            )
         if not result.engaged:
             self._lie_last_pointer_target = None
             self._lie_pending_pointer_target = None
