@@ -499,6 +499,9 @@ lie_detector:
   title_template: "misc/lie_detector_title_cn.png"
   title_match_threshold: 0.70
   panel_confirm_frames: 2
+  # Once confirmed, check the cached title area every 0.2 seconds; a miss also triggers a global search.
+  panel_check_interval_seconds: 0.2
+  # Consecutive failed checks, not processed frames; keep tracking until this threshold.
   panel_miss_frames: 3
   # Native backend only; the SDK receives the complete title-free game frame.
   roi_lock_samples: 3

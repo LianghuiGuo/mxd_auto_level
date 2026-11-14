@@ -70,9 +70,11 @@ class _FakeGate:
     def __init__(self, presence):
         self._presence = list(presence)
         self.calls = 0
+        self.local_checks = []
 
-    def present(self, _frame):
+    def present(self, _frame, *, local=False):
         self.calls += 1
+        self.local_checks.append(local)
         if not self._presence:
             return False
         if len(self._presence) == 1:
@@ -108,6 +110,7 @@ class LieDetectorRuntimeTest(unittest.TestCase):
             "backend": "native",
             "panel_confirm_frames": 2,
             "panel_miss_frames": 3,
+            "panel_check_interval_seconds": 0.0,
             # Existing tests focus on panel/confirm semantics. Dedicated ROI
             # locking behaviour is exercised separately below.
             "roi_lock_samples": 1,
@@ -423,6 +426,146 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertIn("tracker has not received an input frame yet", waiting[0])
         self.assertEqual(runtime._tracker.calls, 0)
 
+    def test_confirmed_panel_checks_title_less_often_but_tracks_every_frame(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime(
+            [True], tracker=tracker, panel_check_interval_seconds=0.2,
+        )
+        first = runtime.update(self.frame, 0.0)
+        second = runtime.update(self.frame, 0.01)
+        self.assertIsNone(first.target_frame)
+        self.assertIsNotNone(second.target_frame)
+        for timestamp in (0.05, 0.10, 0.19):
+            result = runtime.update(self.frame, timestamp)
+            self.assertIsNotNone(result.target_frame)
+            self.assertFalse(result.panel_just_confirmed)
+        self.assertEqual(runtime._panel_gate.calls, 2)
+        self.assertEqual(tracker.calls, 5)
+        self.assertEqual(runtime._seen_streak, 2)
+        runtime.update(self.frame, 0.22)
+        self.assertEqual(runtime._panel_gate.calls, 3)
+        self.assertEqual(runtime._panel_gate.local_checks, [False, False, True])
+
+    def test_brief_miss_and_recovery_do_not_interrupt_confirmed_tracking(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime(
+            [True, True, False, True], tracker=tracker,
+            panel_check_interval_seconds=0.2,
+        )
+        runtime.update(self.frame, 0.0)
+        confirmed = runtime.update(self.frame, 0.01)
+        missed = runtime.update(self.frame, 0.25)
+        skipped = runtime.update(self.frame, 0.30)
+        recovered = runtime.update(self.frame, 0.50)
+        for result in (confirmed, missed, skipped, recovered):
+            self.assertTrue(result.panel_confirmed)
+            self.assertIsNotNone(result.target_frame)
+            self.assertIsNotNone(result.tracking)
+        self.assertFalse(recovered.panel_just_confirmed)
+        self.assertEqual(tracker.calls, 5)
+        self.assertEqual(tracker.resets, 0)
+        self.assertEqual(runtime._miss_streak, 0)
+        self.assertEqual(runtime._seen_streak, 1)
+
+    def test_exit_counts_failed_checks_not_skipped_frames(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime(
+            [True, False], tracker=tracker, panel_confirm_frames=1,
+            panel_check_interval_seconds=0.2, panel_miss_frames=3,
+        )
+        runtime.update(self.frame, 0.0)
+        first_miss = runtime.update(self.frame, 0.25)
+        for timestamp in (0.26, 0.30, 0.40):
+            result = runtime.update(self.frame, timestamp)
+            self.assertEqual(runtime._miss_streak, 1)
+            self.assertIsNotNone(result.target_frame)
+        second_miss = runtime.update(self.frame, 0.50)
+        runtime.update(self.frame, 0.55)
+        self.assertEqual(runtime._miss_streak, 2)
+        self.assertIsNotNone(first_miss.target_frame)
+        self.assertIsNotNone(second_miss.target_frame)
+        closed = runtime.update(self.frame, 0.75)
+        self.assertEqual(closed.phase, PHASE_CONFIRM)
+        self.assertIsNone(closed.target_frame)
+        self.assertEqual(runtime._panel_gate.calls, 4)
+        self.assertEqual(tracker.calls, 7)
+        self.assertEqual(tracker.resets, 1)
+
+    def test_new_panel_after_confirm_phase_requires_fresh_confirmation(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime(
+            [True, True, False, True, True], tracker=tracker,
+            panel_miss_frames=1, panel_check_interval_seconds=0.2,
+        )
+        runtime.update(self.frame, 0.0)
+        self.assertTrue(runtime.update(self.frame, 0.01).panel_just_confirmed)
+        closed = runtime.update(self.frame, 0.25)
+        self.assertEqual(closed.phase, PHASE_CONFIRM)
+        self.assertFalse(runtime._panel_confirmed)
+        new_panel = runtime.update(self.frame, 0.30)
+        self.assertFalse(new_panel.panel_confirmed)
+        self.assertIsNone(new_panel.target_frame)
+        confirmed = runtime.update(self.frame, 0.31)
+        self.assertTrue(confirmed.panel_just_confirmed)
+        self.assertIsNotNone(confirmed.target_frame)
+        self.assertEqual(tracker.resets, 1)
+
+    def test_sdk_keeps_receiving_frames_during_transient_title_misses(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime(
+            [True, True, False, True], tracker=tracker, backend="trtyolo",
+            panel_check_interval_seconds=0.2,
+        )
+        runtime.update(self.frame, 0.0)
+        runtime.update(self.frame, 0.01)
+        for timestamp in (0.25, 0.30, 0.50):
+            result = runtime.update(self.frame, timestamp)
+            self.assertEqual(result.panel_roi, (0, 0, 1296, 700))
+            self.assertEqual(result.target_frame, (30.0, 40.0))
+        self.assertEqual(tracker.calls, 5)
+        self.assertEqual(tracker.resets, 0)
+
+    def test_unconfirmed_panel_miss_still_holds_pointer(self):
+        tracker = _FakeTracker()
+        runtime = self._runtime([True, False, True, True], tracker=tracker)
+        first = runtime.update(self.frame, 0.0)
+        missed = runtime.update(self.frame, 0.01)
+        recovered = runtime.update(self.frame, 0.02)
+        confirmed = runtime.update(self.frame, 0.03)
+        for result in (first, missed, recovered):
+            self.assertFalse(result.panel_confirmed)
+            self.assertIsNone(result.target_frame)
+        self.assertTrue(confirmed.panel_confirmed)
+        self.assertEqual(tracker.calls, 3)
+        self.assertEqual(runtime._panel_gate.calls, 4)
+
+    def test_capture_size_change_forces_an_early_panel_check(self):
+        runtime = self._runtime(
+            [True], backend="trtyolo", panel_confirm_frames=1,
+            panel_check_interval_seconds=0.2,
+        )
+        runtime.update(self.frame, 0.0)
+        resized = np.zeros((1080, 1920, 3), np.uint8)
+        result = runtime.update(resized, 0.05)
+        self.assertEqual(runtime._panel_gate.calls, 2)
+        self.assertEqual(result.panel_roi, (0, 0, 1920, 1080))
+        self.assertIsNotNone(result.target_frame)
+
+    @patch("src.engine.LieDetectorRuntime.logger")
+    def test_panel_gate_log_reports_check_cost_and_misses(self, log):
+        runtime = self._runtime(
+            [True, False], panel_confirm_frames=1,
+            panel_check_interval_seconds=0.2,
+        )
+        runtime.update(self.frame, 0.0)
+        runtime.update(self.frame, 0.25)
+        messages = [call.args[0] for call in log.info.call_args_list]
+        diagnostics = [text for text in messages if "Panel gate;" in text]
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("checks=1", diagnostics[0])
+        self.assertIn("miss_streak=1/3", diagnostics[0])
+        self.assertIn("avg_check_ms=", diagnostics[0])
+
     def test_short_panel_miss_holds_before_confirm_phase(self):
         tracker = _FakeTracker()
         runtime = self._runtime(
@@ -487,6 +630,47 @@ class LiePanelGateTest(unittest.TestCase):
 
         self.assertTrue(gate.present(frame))
         self.assertFalse(gate.present(_noise_frame(seed=11)))
+
+    def test_cached_title_uses_a_smaller_search_region(self):
+        gate = LiePanelGate(TITLE_TEMPLATE, 0.70)
+        template = cv2.imread(str(TITLE_TEMPLATE), cv2.IMREAD_COLOR)
+        frame = _noise_frame()
+        height, width = template.shape[:2]
+        frame[84:84 + height, 284:284 + width] = template
+        self.assertTrue(gate.present(frame))
+        self.assertEqual(gate._cached_title_box[:2], (284, 84))
+        with patch("cv2.matchTemplate", wraps=cv2.matchTemplate) as match:
+            self.assertTrue(gate.present(frame, local=True))
+        region = match.call_args.args[0]
+        self.assertLess(region.shape[0], frame.shape[0] // 4)
+        self.assertLess(region.shape[1], frame.shape[1] // 2)
+        self.assertEqual(gate.last_search, "local")
+
+    def test_local_miss_falls_back_to_global_for_panel_movement(self):
+        gate = LiePanelGate(TITLE_TEMPLATE, 0.70)
+        template = cv2.imread(str(TITLE_TEMPLATE), cv2.IMREAD_COLOR)
+        height, width = template.shape[:2]
+        initial = _noise_frame()
+        initial[84:84 + height, 284:284 + width] = template
+        self.assertTrue(gate.present(initial))
+        moved = _noise_frame(seed=11)
+        moved[54:54 + height, 600:600 + width] = template
+        self.assertTrue(gate.present(moved, local=True))
+        self.assertEqual(gate.last_search, "local+global")
+        self.assertEqual(gate._cached_title_box[:2], (600, 54))
+        self.assertTrue(gate.present(moved, local=True))
+        self.assertEqual(gate.last_search, "local")
+
+    def test_missing_title_fails_both_local_and_global_checks(self):
+        gate = LiePanelGate(TITLE_TEMPLATE, 0.70)
+        template = cv2.imread(str(TITLE_TEMPLATE), cv2.IMREAD_COLOR)
+        height, width = template.shape[:2]
+        frame = _noise_frame()
+        frame[84:84 + height, 284:284 + width] = template
+        self.assertTrue(gate.present(frame))
+        self.assertFalse(gate.present(_noise_frame(seed=11), local=True))
+        self.assertEqual(gate.last_search, "local+global")
+        self.assertLess(gate.last_score, gate.threshold)
 
     def test_scale_cache_is_dropped_when_frame_size_changes(self):
         gate = LiePanelGate(TITLE_TEMPLATE, 0.70)

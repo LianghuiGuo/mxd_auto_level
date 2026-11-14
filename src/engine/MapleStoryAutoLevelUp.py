@@ -298,6 +298,7 @@ class MapleStoryAutoBot:
         lie_cfg.setdefault("title_template", "misc/lie_detector_title_cn.png")
         lie_cfg.setdefault("title_match_threshold", 0.70)
         lie_cfg.setdefault("panel_confirm_frames", 2)
+        lie_cfg.setdefault("panel_check_interval_seconds", 0.2)
         lie_cfg.setdefault("panel_miss_frames", 3)
         lie_cfg.setdefault("roi_lock_samples", 3)
         lie_cfg.setdefault("processing_fps", 33)

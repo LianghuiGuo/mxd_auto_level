@@ -86,7 +86,10 @@ class LiePanelGate:
         self.sweep_interval = max(1, int(sweep_interval))
         self._cached_scale: Optional[tuple[float, float]] = None
         self._cached_for_size: Optional[tuple[int, int]] = None
+        self._cached_title_box: Optional[tuple[int, int, int, int]] = None
         self._calls = 0
+        self.last_score = -1.0
+        self.last_search = "global"
 
     def _candidate_scales(
         self, frame_size: tuple[int, int]
@@ -95,6 +98,7 @@ class LiePanelGate:
         base_y = frame_size[1] / _TEMPLATE_REFERENCE_SIZE[1]
         if self._cached_for_size != frame_size:
             self._cached_scale = None
+            self._cached_title_box = None
             self._cached_for_size = frame_size
         primary = self._cached_scale or (base_x, base_y)
         if self._calls % self.sweep_interval:
@@ -105,44 +109,67 @@ class LiePanelGate:
         ]
         return [primary] + [scale for scale in variants if scale != primary]
 
-    def score(self, frame_bgr: np.ndarray) -> float:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        region = gray[
-            : max(1, int(_TITLE_SEARCH_HEIGHT_RATIO * gray.shape[0])), :
-        ]
-        height, width = self.template.shape
-        frame_size = (frame_bgr.shape[1], frame_bgr.shape[0])
-        scales = self._candidate_scales(frame_size)
-        self._calls += 1
-
+    def _score_region(
+        self, frame_bgr: np.ndarray, bounds: tuple[int, int, int, int],
+        scales: list[tuple[float, float]],
+    ) -> float:
+        x, y, width, height = bounds
+        region = cv2.cvtColor(frame_bgr[y:y + height, x:x + width], cv2.COLOR_BGR2GRAY)
+        template_height, template_width = self.template.shape
         best = -1.0
         best_scale = None
+        best_box = None
         for scale_x, scale_y in scales:
             resized = cv2.resize(
                 self.template,
                 (
-                    max(4, int(round(width * scale_x))),
-                    max(4, int(round(height * scale_y))),
+                    max(4, int(round(template_width * scale_x))),
+                    max(4, int(round(template_height * scale_y))),
                 ),
             )
-            if (
-                resized.shape[0] >= region.shape[0]
-                or resized.shape[1] >= region.shape[1]
-            ):
+            if resized.shape[0] > region.shape[0] or resized.shape[1] > region.shape[1]:
                 continue
             matched = cv2.matchTemplate(region, resized, cv2.TM_CCOEFF_NORMED)
-            peak = float(cv2.minMaxLoc(matched)[1])
+            _minimum, peak, _minimum_location, location = cv2.minMaxLoc(matched)
             if peak > best:
-                best = peak
+                best = float(peak)
                 best_scale = (scale_x, scale_y)
+                best_box = (x + location[0], y + location[1], resized.shape[1], resized.shape[0])
             if peak >= self.threshold:
                 break
-        if best >= self.threshold and best_scale is not None:
+        if best >= self.threshold:
             self._cached_scale = best_scale
+            self._cached_title_box = best_box
         return best
 
-    def present(self, frame_bgr: np.ndarray) -> bool:
-        return self.score(frame_bgr) >= self.threshold
+    def score(self, frame_bgr: np.ndarray, *, local: bool = False) -> float:
+        frame_size = (frame_bgr.shape[1], frame_bgr.shape[0])
+        scales = self._candidate_scales(frame_size)
+        self._calls += 1
+        if local and self._cached_title_box is not None:
+            x, y, width, height = self._cached_title_box
+            pad_x, pad_y = max(24, width // 2), max(20, height)
+            x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+            x1 = min(frame_size[0], x + width + pad_x)
+            y1 = min(frame_size[1], y + height + pad_y)
+            self.last_search = "local"
+            self.last_score = self._score_region(
+                frame_bgr, (x0, y0, x1 - x0, y1 - y0), scales
+            )
+            if self.last_score >= self.threshold:
+                return self.last_score
+            self.last_search = "local+global"
+        else:
+            self.last_search = "global"
+        self.last_score = self._score_region(
+            frame_bgr,
+            (0, 0, frame_size[0], max(1, int(_TITLE_SEARCH_HEIGHT_RATIO * frame_size[1]))),
+            scales,
+        )
+        return self.last_score
+
+    def present(self, frame_bgr: np.ndarray, *, local: bool = False) -> bool:
+        return self.score(frame_bgr, local=local) >= self.threshold
 
 
 def _orange_mask(hsv: np.ndarray) -> np.ndarray:
@@ -258,6 +285,7 @@ class LieDetectorRuntime:
         self.confirm_detector = confirm_detector
         self.confirm_frames = max(1, int(config.get("panel_confirm_frames", 2)))
         self.miss_frames = max(1, int(config.get("panel_miss_frames", 3)))
+        self.panel_check_interval = max(0.0, float(config.get("panel_check_interval_seconds", 0.2)))
         # A moving crop changes every track's local coordinate system. Gather
         # a few early chrome detections and then keep their median ROI fixed
         # for the entire challenge. Tracking starts only after the lock.
@@ -307,6 +335,12 @@ class LieDetectorRuntime:
         self._last_tracking_error_at = float("-inf")
         self._panel_started_at = None
         self._last_roi_log_at = float("-inf")
+        self._last_panel_check_at = float("-inf")
+        self._last_panel_frame_size = None
+        self._last_gate_log_at = float("-inf")
+        self._gate_checks = 0
+        self._gate_misses = 0
+        self._gate_ms_sum = 0.0
 
     def _reset_tracker(self) -> None:
         if self._tracker is not None:
@@ -421,16 +455,52 @@ class LieDetectorRuntime:
     def update(
         self, frame_bgr: np.ndarray, timestamp: float
     ) -> LieDetectorRuntimeResult:
-        if self._ensure_panel_gate().present(frame_bgr):
+        active_panel = self.phase == PHASE_PANEL and self._panel_confirmed
+        frame_size = (frame_bgr.shape[1], frame_bgr.shape[0])
+        if (
+            active_panel
+            and frame_size == self._last_panel_frame_size
+            and timestamp - self._last_panel_check_at < self.panel_check_interval
+        ):
             return self._update_panel(frame_bgr, timestamp)
-        if self.phase == PHASE_PANEL:
+
+        gate = self._ensure_panel_gate()
+        check_started = time.monotonic()
+        present = gate.present(frame_bgr, local=active_panel)
+        check_ms = (time.monotonic() - check_started) * 1000.0
+        self._last_panel_check_at = timestamp
+        self._last_panel_frame_size = frame_size
+        if present:
+            self._seen_streak += 1
+            self._miss_streak = 0
+        elif self.phase == PHASE_PANEL:
             self._miss_streak += 1
             self._seen_streak = 0
+        if active_panel:
+            self._gate_checks += 1
+            self._gate_misses += int(not present)
+            self._gate_ms_sum += check_ms
+            if timestamp - self._last_gate_log_at >= 5.0:
+                self._last_gate_log_at = timestamp
+                logger.info(
+                    f"[Lie Detector] Panel gate; checks={self._gate_checks}; "
+                    f"misses={self._gate_misses}; "
+                    f"miss_streak={self._miss_streak}/{self.miss_frames}; "
+                    f"avg_check_ms={self._gate_ms_sum / self._gate_checks:.2f}; "
+                    f"interval_s={self.panel_check_interval}; "
+                    f"search={getattr(gate, 'last_search', 'unknown')}; "
+                    f"score={getattr(gate, 'last_score', None)}."
+                )
+        if present:
+            return self._update_panel(frame_bgr, timestamp)
+        if self.phase == PHASE_PANEL:
             if self._miss_streak < self.miss_frames:
+                if self._panel_confirmed:
+                    return self._update_panel(frame_bgr, timestamp)
                 return LieDetectorRuntimeResult(
                     engaged=True,
                     phase=PHASE_PANEL,
-                    panel_confirmed=self._panel_confirmed,
+                    panel_confirmed=False,
                     panel_roi=self._roi,
                 )
             self._enter_confirm_phase(timestamp)
@@ -450,8 +520,6 @@ class LieDetectorRuntime:
                 f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]}); "
                 f"input_mode={'full_game' if sdk_input else 'panel_roi'}."
             )
-        self._miss_streak = 0
-        self._seen_streak += 1
         self.phase = PHASE_PANEL
         panel_just_confirmed = bool(
             not self._panel_confirmed
@@ -532,7 +600,7 @@ class LieDetectorRuntime:
             )
         target = None
         if (
-            self._seen_streak >= self.confirm_frames
+            self._panel_confirmed
             and tracking.actionable
             and tracking.center is not None
         ):
@@ -552,7 +620,9 @@ class LieDetectorRuntime:
 
     def _enter_confirm_phase(self, timestamp: float) -> None:
         logger.info(
-            "[Lie Detector] Resetting tracker because the panel disappeared."
+            f"[Lie Detector] Resetting tracker after "
+            f"{self._miss_streak} consecutive panel checks missed; "
+            f"interval_s={self.panel_check_interval}."
         )
         self._reset_tracker()
         self._panel_started_at = None
@@ -562,6 +632,7 @@ class LieDetectorRuntime:
         self._roi_locked = False
         self._seen_streak = 0
         self._miss_streak = 0
+        self._panel_confirmed = False
         self._confirm_deadline = timestamp + self.confirm_wait_seconds
         self._confirm_clicks = 0
         self._last_confirm_click_at = float("-inf")
