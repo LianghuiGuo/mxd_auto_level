@@ -24,7 +24,6 @@ import cv2
 import numpy as np
 
 from ml.detect_lie_panels import detect_frame
-from src.engine.LieDetectorDiagnostics import save_input_snapshot
 from src.engine.LieDetectorTracker import (
     LieDetectorTracker,
     LieDetectorTrackingResult,
@@ -378,6 +377,9 @@ class LieDetectorRuntime:
                 self._tracker = LieDetectorSdkTracker(
                     self.config.get("sdk_directory", DEFAULT_SDK_DIRECTORY),
                     force_cpu=bool(self.config.get("sdk_force_cpu", False)),
+                    session_recording=bool(self.config.get("sdk_session_recording", True)),
+                    session_image_fps=float(self.config.get("sdk_session_image_fps", 3.0)),
+                    session_max_memory_mb=float(self.config.get("sdk_session_max_memory_mb", 128.0)),
                 )
                 return self._tracker
             if backend != "native":
@@ -430,9 +432,6 @@ class LieDetectorRuntime:
                 flow_coast=bool(self.config.get("flow_coast", False)),
             )
         return self._tracker
-
-    def _save_input_diagnostics(self, frame: np.ndarray) -> None:
-        save_input_snapshot(frame)
 
     def record_mouse_action(self, timestamp, action, location, call_ms, completed_at):
         if self.config.get("backend", "trtyolo") == "trtyolo" and self._tracker is not None:
@@ -552,7 +551,6 @@ class LieDetectorRuntime:
                     f"frame_wh=({frame_bgr.shape[1]},{frame_bgr.shape[0]}); "
                     "ROI detection skipped; coordinates are title-free capture pixels."
                 )
-                self._save_input_diagnostics(frame_bgr[y:y + height, x:x + width])
         elif not self._roi_locked:
             roi = self.roi_detector(frame_bgr)
             if roi is not None and self._valid_roi(roi, frame_bgr):

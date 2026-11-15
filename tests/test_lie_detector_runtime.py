@@ -101,9 +101,6 @@ class LieDetectorRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.frame = np.zeros((700, 1296, 3), dtype=np.uint8)
         self.roi = (300, 120, 600, 420)
-        image_writer = patch("src.engine.LieDetectorRuntime.save_input_snapshot")
-        image_writer.start()
-        self.addCleanup(image_writer.stop)
 
     def _runtime(self, presence, *, tracker=None, confirm=None, **config):
         settings = {
@@ -347,7 +344,8 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         runtime = LieDetectorRuntime({})
         self.assertIs(runtime._ensure_tracker(), sdk_class.return_value)
         sdk_class.assert_called_once_with(
-            "trtyoloLie_SDK_v220_x64/bin64", force_cpu=False
+            "trtyoloLie_SDK_v220_x64/bin64", force_cpu=False,
+            session_recording=True, session_image_fps=3.0, session_max_memory_mb=128.0,
         )
         detector_class.assert_not_called()
 
@@ -357,9 +355,15 @@ class LieDetectorRuntimeTest(unittest.TestCase):
             "backend": "trtyolo",
             "sdk_directory": "vendor/bin64",
             "sdk_force_cpu": True,
+            "sdk_session_recording": False,
+            "sdk_session_image_fps": 2.0,
+            "sdk_session_max_memory_mb": 64.0,
         })
         runtime._ensure_tracker()
-        sdk_class.assert_called_once_with("vendor/bin64", force_cpu=True)
+        sdk_class.assert_called_once_with(
+            "vendor/bin64", force_cpu=True, session_recording=False,
+            session_image_fps=2.0, session_max_memory_mb=64.0,
+        )
 
     @patch("src.engine.LieDetectorRuntime.LieShapeYoloDetector")
     @patch("src.engine.LieDetectorRuntime.LieDetectorSdkTracker")
@@ -444,26 +448,6 @@ class LieDetectorRuntimeTest(unittest.TestCase):
         self.assertIsNone(runtime._tracker)
         self.assertEqual(runtime.phase, PHASE_IDLE)
         self.assertIsNone(runtime._roi)
-
-    @patch("src.engine.LieDetectorRuntime.save_input_snapshot")
-    def test_fixed_input_snapshot_is_queued_once_per_challenge(self, save_image):
-        runtime = self._runtime([True], backend="trtyolo", panel_confirm_frames=1)
-        runtime.update(self.frame, 1.0)
-        runtime.update(self.frame, 2.0)
-        save_image.assert_called_once()
-        self.assertEqual(save_image.call_args.args[0].shape, (468, 702, 3))
-        np.testing.assert_array_equal(save_image.call_args.args[0], self.frame[81:549, 290:992])
-        runtime.reset()
-        runtime.update(self.frame, 3.0)
-        self.assertEqual(save_image.call_count, 2)
-        self.assertEqual(save_image.call_args.args[0].shape, (468, 702, 3))
-
-    @patch("src.engine.LieDetectorRuntime.save_input_snapshot", return_value=None)
-    def test_full_save_queue_does_not_block_tracking(self, save_image):
-        runtime = self._runtime([True], backend="trtyolo", panel_confirm_frames=1)
-        result = runtime.update(self.frame, 1.0)
-        self.assertIsNotNone(result.target_frame)
-        self.assertEqual(save_image.call_count, 1)
 
     @patch("src.engine.LieDetectorRuntime.logger")
     def test_waiting_for_roi_logs_that_tracker_has_not_received_frames(self, log):

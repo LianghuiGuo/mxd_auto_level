@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 from concurrent.futures import Future
 import csv
+import json
 import math
 from pathlib import Path
 import queue
@@ -93,31 +94,35 @@ def _overlay(frame, record):
     return image
 
 
-def _write_input_snapshot(frame):
+def _session_directory(session_id):
+    output = Path("log") / "lie_sdk_sessions" / session_id
+    output.mkdir(parents=True, exist_ok=True)
+    return output
+
+
+def _write_input_snapshot(frame, session_id):
     started = time.monotonic()
-    output = Path("log")
-    output.mkdir(exist_ok=True)
+    output = _session_directory(session_id)
     _write_image(output / "lie_sdk_input_frame.png", frame)
     logger.info(
         "[Lie Detector] SDK input snapshot saved in background to "
-        "log/lie_sdk_input_frame.png; coordinates are local to the SDK input image; "
+        f"{output / 'lie_sdk_input_frame.png'}; coordinates are local to the SDK input image; "
         f"write_ms={(time.monotonic() - started) * 1000:.1f}."
     )
 
 
-def save_input_snapshot(frame):
-    return _writer.submit(_write_input_snapshot, frame.copy())
+def save_input_snapshot(frame, session_id):
+    return _writer.submit(_write_input_snapshot, frame.copy(), session_id)
 
 
-def _write_first_lock(frame, record):
+def _write_first_lock(frame, record, session_id):
     started = time.monotonic()
-    output = Path("log")
-    output.mkdir(exist_ok=True)
+    output = _session_directory(session_id)
     _write_image(output / "lie_sdk_first_lock_frame.png", frame)
     _write_image(output / "lie_sdk_first_lock_overlay.png", _overlay(frame, record))
     logger.info(
         "[Lie Detector SDK] First-lock snapshots saved in background to "
-        "log/lie_sdk_first_lock_{frame,overlay}.png; "
+        f"{output}/lie_sdk_first_lock_{{frame,overlay}}.png; "
         f"frame={record['frame']}; captured_at={record['captured_at']}; "
         f"center=({record['center_x']},{record['center_y']}); "
         "green=SDK bbox, red=SDK center (not measured mouse position); "
@@ -125,14 +130,13 @@ def _write_first_lock(frame, record):
     )
 
 
-def save_first_lock_snapshot(frame, record):
-    return _writer.submit(_write_first_lock, frame.copy(), dict(record))
+def save_first_lock_snapshot(frame, record, session_id):
+    return _writer.submit(_write_first_lock, frame.copy(), dict(record), session_id)
 
 
-def _write_recent_trace(records, frames, reason):
+def _write_recent_trace(records, frames, reason, session_id):
     started = time.monotonic()
-    output = Path("log")
-    output.mkdir(exist_ok=True)
+    output = _session_directory(session_id)
     csv_path = output / "lie_sdk_recent_trace.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(records[0]))
@@ -158,14 +162,53 @@ def _write_recent_trace(records, frames, reason):
     logger.info(
         f"[Lie Detector SDK] Recent trace saved in background; reason={reason}; "
         f"records={len(records)}; sampled_frames={len(frames)}; "
-        "files=log/lie_sdk_recent_trace.csv, log/lie_sdk_recent_overlay.png; "
+        f"files={csv_path}, {output / 'lie_sdk_recent_overlay.png'}; "
         "last two seconds of SDK observations, images sampled at most 5 FPS; "
-        "screen requests are not measured cursor positions; files overwrite the previous trace; "
+        "screen requests are not measured cursor positions; "
+        "each challenge uses a separate directory; "
         f"write_ms={(time.monotonic() - started) * 1000:.1f}."
     )
 
 
-def save_recent_trace(records, frames, reason):
+def save_recent_trace(records, frames, reason, session_id):
     if not records:
         return None
-    return _writer.submit(_write_recent_trace, [dict(record) for record in records], list(frames), reason)
+    return _writer.submit(
+        _write_recent_trace, [dict(record) for record in records], list(frames), reason, session_id
+    )
+
+
+def _write_session(records, frames, metadata):
+    started = time.monotonic()
+    output = _session_directory(metadata["session_id"])
+    frame_directory = output / "frames"
+    frame_directory.mkdir(parents=True, exist_ok=False)
+    sampled_numbers = {number for number, _frame in frames}
+    fieldnames = list(records[0]) + ["image_file"]
+    with (output / "trace.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            number = record["frame"]
+            image_file = f"frames/{number:06d}.png" if number in sampled_numbers else ""
+            writer.writerow({**record, "image_file": image_file})
+    for number, frame in frames:
+        _write_image(frame_directory / f"{number:06d}.png", frame)
+    (output / "session.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    logger.info(
+        f"[Lie Detector SDK] Session saved in background to {output}; "
+        f"records={len(records)}; sampled_frames={len(frames)}; "
+        f"image_fps={metadata['image_fps']}; truncated={metadata['truncated']}; "
+        "raw images use SDK input coordinates; not a full-frame replay; "
+        f"write_ms={(time.monotonic() - started) * 1000:.1f}."
+    )
+
+
+def save_session(records, frames, metadata):
+    if not records:
+        return None
+    return _writer.submit(
+        _write_session, [dict(record) for record in records], list(frames), dict(metadata)
+    )

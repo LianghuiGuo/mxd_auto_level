@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from src.engine.LieDetectorRuntime import LieDetectorRuntime
 from src.engine.LieDetectorSdkTracker import LieDetectorSdkTracker
 
 
@@ -31,12 +32,18 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         self.output = [0, 30, 40, 10, 15, 40, 50, 802]
         self.last_input = None
         self.search_directory = Mock()
+        input_writer = patch("src.engine.LieDetectorSdkTracker.save_input_snapshot")
+        input_writer.start()
+        self.addCleanup(input_writer.stop)
         first_lock_writer = patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot")
         first_lock_writer.start()
         self.addCleanup(first_lock_writer.stop)
         trace_writer = patch("src.engine.LieDetectorSdkTracker.save_recent_trace")
         trace_writer.start()
         self.addCleanup(trace_writer.stop)
+        session_writer = patch("src.engine.LieDetectorSdkTracker.save_session")
+        session_writer.start()
+        self.addCleanup(session_writer.stop)
         patches = (
             patch("src.engine.LieDetectorSdkTracker.sys.platform", "win32"),
             patch("src.engine.LieDetectorSdkTracker.Path.is_file", return_value=True),
@@ -288,6 +295,89 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         self.assertFalse(result.actionable)
         self.assertIn("OUT_OF_BOUNDS", log.warning.call_args.args[0])
 
+    @patch("src.engine.LieDetectorSdkTracker.save_input_snapshot")
+    def test_input_snapshot_is_queued_before_detection_once_per_challenge(self, save):
+        tracker = self._tracker()
+        frame = np.full((100, 120, 3), 25, dtype=np.uint8)
+        self.status = 1
+        order = []
+        save.side_effect = lambda *_args: order.append("snapshot")
+
+        def detect(*args):
+            order.append("detect")
+            return self._detect(*args)
+
+        self.lib.TTx_Detect.side_effect = detect
+        tracker.update(frame, 1.0)
+        tracker.update(frame, 2.0)
+        self.assertEqual(order, ["snapshot", "detect", "detect"])
+        self.assertEqual(save.call_count, 1)
+        np.testing.assert_array_equal(save.call_args.args[0], frame)
+        first_session = save.call_args.args[1]
+        self.assertEqual(first_session, tracker._session_id)
+        tracker.reset()
+        tracker.update(frame, 3.0)
+        self.assertEqual(save.call_count, 2)
+        self.assertNotEqual(first_session, save.call_args.args[1])
+        self.assertEqual(save.call_args.args[1], tracker._session_id)
+
+    @patch("src.engine.LieDetectorSdkTracker.save_input_snapshot")
+    def test_runtime_snapshot_uses_exact_sdk_crop_and_tracker_session(self, save):
+        tracker = self._tracker()
+        runtime = LieDetectorRuntime(
+            {"backend": "trtyolo", "panel_confirm_frames": 1},
+            panel_gate=SimpleNamespace(present=Mock(return_value=True)),
+            confirm_detector=lambda _frame: None,
+            tracker=tracker,
+        )
+        frame = np.arange(700 * 1296 * 3, dtype=np.uint8).reshape(700, 1296, 3)
+        result = runtime.update(frame, 1.0)
+        self.assertEqual(result.target_frame, (320.0, 121.0))
+        save.assert_called_once()
+        saved_frame, session_id = save.call_args.args
+        self.assertEqual(saved_frame.shape, (468, 702, 3))
+        np.testing.assert_array_equal(saved_frame, frame[81:549, 290:992])
+        self.assertEqual(saved_frame.tobytes(), self.input_bytes)
+        self.assertEqual(session_id, tracker._session_id)
+        runtime.update(frame, 2.0)
+        save.assert_called_once()
+        runtime.reset()
+        runtime.update(frame, 3.0)
+        self.assertEqual(save.call_count, 2)
+        self.assertNotEqual(session_id, save.call_args.args[1])
+
+    @patch("src.engine.LieDetectorSdkTracker.save_input_snapshot", return_value=None)
+    def test_full_input_save_queue_does_not_block_or_repeat_snapshot(self, save):
+        tracker = self._tracker()
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+        result = tracker.update(frame, 1.0)
+        self.assertTrue(result.actionable)
+        tracker.update(frame, 2.0)
+        save.assert_called_once()
+
+    @patch("src.engine.LieDetectorSdkTracker.save_input_snapshot")
+    @patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot")
+    @patch("src.engine.LieDetectorSdkTracker.save_recent_trace")
+    @patch("src.engine.LieDetectorSdkTracker.save_session")
+    def test_all_diagnostics_share_session_even_when_full_recording_is_disabled(
+        self, session_save, recent_save, lock_save, input_save,
+    ):
+        for enabled in (True, False):
+            with self.subTest(session_recording=enabled):
+                tracker = self._tracker(session_recording=enabled)
+                tracker.update(np.zeros((100, 120, 3), np.uint8), 1.0)
+                session_id = tracker._session_id
+                tracker.close()
+                self.assertTrue(session_id)
+                self.assertEqual(input_save.call_args.args[1], session_id)
+                self.assertEqual(lock_save.call_args.args[2], session_id)
+                self.assertEqual(recent_save.call_args.args[3], session_id)
+                if enabled:
+                    self.assertEqual(session_save.call_args.args[2]["session_id"], session_id)
+                else:
+                    session_save.assert_not_called()
+                session_save.reset_mock()
+
     @patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot")
     def test_first_lock_queues_frame_and_raw_bbox_without_mutating_input(self, save):
         tracker = self._tracker()
@@ -300,7 +390,8 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         result = tracker.update(frame, 2.0)
         self.assertTrue(result.actionable)
         save.assert_called_once()
-        saved_frame, record = save.call_args.args
+        saved_frame, record, session_id = save.call_args.args
+        self.assertEqual(session_id, tracker._session_id)
         np.testing.assert_array_equal(saved_frame, original)
         np.testing.assert_array_equal(frame, original)
         self.assertEqual((record["bbox_x"], record["bbox_y"], record["bbox_width"], record["bbox_height"]), (10, 15, 40, 50))
@@ -322,6 +413,7 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         tracker.reset()
         tracker.update(frame)
         self.assertEqual(save.call_count, 2)
+        self.assertNotEqual(save.call_args_list[0].args[2], save.call_args_list[1].args[2])
 
     @patch("src.engine.LieDetectorSdkTracker.save_first_lock_snapshot", return_value=None)
     def test_full_save_queue_preserves_tracking_and_does_not_retry_each_frame(self, save):
@@ -345,7 +437,8 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         save.assert_not_called()
         tracker.close()
         save.assert_called_once()
-        records, frames, reason = save.call_args.args
+        records, frames, reason, session_id = save.call_args.args
+        self.assertEqual(session_id, tracker._session_id)
         self.assertEqual(reason, "close")
         self.assertEqual(records[-1]["frame"], 61)
         self.assertEqual(records[-1]["confidence"], 0.802)
@@ -373,6 +466,110 @@ class LieDetectorSdkTrackerTest(unittest.TestCase):
         self.assertEqual(save.call_args.args[2], "reset")
         self.assertEqual(len(tracker._recent_records), 0)
         self.assertEqual(len(tracker._recent_frames), 0)
+
+    @patch("src.engine.LieDetectorSdkTracker.save_session")
+    def test_session_samples_three_images_per_second_and_keeps_all_call_records(self, save):
+        tracker = self._tracker()
+        frame = np.zeros((100, 120, 3), np.uint8)
+        self.status = 1
+        for index in range(30):
+            frame[:] = index
+            tracker.update(frame, 10.0 + index / 15.0)
+        self.assertEqual(len(tracker._session_records), 30)
+        self.assertEqual([number for number, _image in tracker._session_frames], [1, 6, 11, 16, 21, 26])
+        self.assertEqual(tracker._session_bytes, 6 * frame.nbytes)
+        np.testing.assert_array_equal(tracker._session_frames[0][1], np.zeros_like(frame))
+        self.assertEqual(len(tracker._recent_records), 30)
+        save.assert_not_called()
+        tracker.close()
+        save.assert_called_once()
+        records, images, metadata = save.call_args.args
+        self.assertEqual(len(records), 30)
+        self.assertEqual(len(images), 6)
+        self.assertEqual(metadata["reason"], "close")
+        self.assertEqual(metadata["image_fps"], 3.0)
+        self.assertFalse(metadata["truncated"])
+        self.assertTrue(all(record["status"] == 1 for record in records))
+
+    def test_session_sampling_does_not_catch_up_with_duplicate_frames_after_a_gap(self):
+        tracker = self._tracker()
+        frame = np.zeros((100, 120, 3), np.uint8)
+        for timestamp in (1.0, 1.1, 5.0, 5.01, 5.02, 5.03):
+            tracker.update(frame, timestamp)
+        self.assertEqual([number for number, _image in tracker._session_frames], [1, 3])
+        self.assertEqual(len(tracker._session_records), 6)
+
+    @patch("src.engine.LieDetectorSdkTracker.save_session")
+    def test_session_image_memory_limit_preserves_records_and_tracking(self, save):
+        frame = np.zeros((100, 120, 3), np.uint8)
+        tracker = self._tracker(session_max_memory_mb=frame.nbytes / 1048576.0)
+        for timestamp in (1.0, 1.4, 1.8):
+            result = tracker.update(frame, timestamp)
+            self.assertTrue(result.actionable)
+        self.assertEqual(len(tracker._session_frames), 1)
+        self.assertEqual(len(tracker._session_records), 3)
+        self.assertLessEqual(tracker._session_bytes, tracker._session_max_bytes)
+        tracker.close()
+        metadata = save.call_args.args[2]
+        self.assertTrue(metadata["truncated"])
+        self.assertTrue(metadata["images_truncated"])
+        self.assertFalse(metadata["records_truncated"])
+
+    @patch("src.engine.LieDetectorSdkTracker.save_session")
+    def test_disabled_session_recording_keeps_existing_recent_trace(self, save):
+        tracker = self._tracker(session_recording=False)
+        tracker.update(np.zeros((100, 120, 3), np.uint8), 1.0)
+        self.assertEqual(len(tracker._recent_records), 1)
+        self.assertEqual(len(tracker._session_records), 0)
+        self.assertEqual(len(tracker._session_frames), 0)
+        tracker.close()
+        save.assert_not_called()
+
+    @patch("src.engine.LieDetectorSdkTracker.save_session")
+    def test_session_reset_saves_once_and_uses_a_new_directory(self, save):
+        tracker = self._tracker()
+        frame = np.zeros((100, 120, 3), np.uint8)
+        tracker.update(frame, 1.0)
+        tracker.reset()
+        first = save.call_args.args[2]
+        self.assertEqual(first["reason"], "reset")
+        self.assertEqual(len(tracker._session_records), 0)
+        self.assertEqual(len(tracker._session_frames), 0)
+        self.assertEqual(tracker._session_bytes, 0)
+        tracker.update(frame, 2.0)
+        tracker.close()
+        tracker.close()
+        self.assertEqual(save.call_count, 2)
+        self.assertNotEqual(first["session_id"], save.call_args.args[2]["session_id"])
+
+    @patch("src.engine.LieDetectorSdkTracker.save_session")
+    def test_full_session_save_queue_does_not_prevent_native_cleanup(self, save):
+        save.return_value = None
+        tracker = self._tracker()
+        tracker.update(np.zeros((100, 120, 3), np.uint8), 1.0)
+        tracker.close()
+        self.lib.TTx_Destroy.assert_called_once_with(self.handle)
+        self.assertEqual(len(tracker._session_frames), 0)
+
+    @patch("src.engine.LieDetectorSdkTracker.save_session")
+    def test_session_mouse_action_updates_the_full_call_record(self, save):
+        tracker = self._tracker()
+        tracker.update(np.zeros((100, 120, 3), np.uint8), 1.0)
+        tracker.record_mouse_action(1.0, "move_requested", (700, 450), 1.0, 1.08)
+        tracker.close()
+        record = save.call_args.args[0][0]
+        self.assertEqual(record["mouse_action"], "move_requested")
+        self.assertEqual((record["requested_x"], record["requested_y"]), (700, 450))
+        self.assertAlmostEqual(record["action_frame_age_ms"], 80.0)
+
+    def test_session_parameters_must_be_positive_and_finite(self):
+        for settings in (
+            {"session_image_fps": 0}, {"session_image_fps": float("nan")},
+            {"session_max_memory_mb": -1}, {"session_max_memory_mb": float("inf")},
+        ):
+            with self.subTest(settings=settings):
+                with self.assertRaises(ValueError):
+                    LieDetectorSdkTracker(**settings)
 
 
 if __name__ == "__main__":

@@ -2,16 +2,24 @@ from __future__ import annotations
 
 from collections import deque
 import ctypes
+import datetime
+import math
 import os
 from pathlib import Path
 import sys
 import threading
 import time
 from typing import Optional
+import uuid
 
 import numpy as np
 
-from src.engine.LieDetectorDiagnostics import save_first_lock_snapshot, save_recent_trace
+from src.engine.LieDetectorDiagnostics import (
+    save_first_lock_snapshot,
+    save_input_snapshot,
+    save_recent_trace,
+    save_session,
+)
 from src.engine.LieDetectorTracker import LieDetectorTrackingResult
 from src.utils.logger import logger
 
@@ -31,6 +39,9 @@ class LieDetectorSdkTracker:
         sdk_directory: str | Path = DEFAULT_SDK_DIRECTORY,
         *,
         force_cpu: bool = False,
+        session_recording: bool = True,
+        session_image_fps: float = 3.0,
+        session_max_memory_mb: float = 128.0,
     ) -> None:
         self._lock = threading.Lock()
         self._handle = None
@@ -39,6 +50,14 @@ class LieDetectorSdkTracker:
         self._frame_size = None
         self.last_ms = 0
         self.backend = ""
+        self.session_recording = bool(session_recording)
+        self.session_image_fps = float(session_image_fps)
+        memory_mb = float(session_max_memory_mb)
+        if not math.isfinite(self.session_image_fps) or self.session_image_fps <= 0:
+            raise ValueError("session_image_fps must be positive and finite")
+        if not math.isfinite(memory_mb) or memory_mb <= 0:
+            raise ValueError("session_max_memory_mb must be positive and finite")
+        self._session_max_bytes = int(memory_mb * 1024 * 1024)
         self._clear_diagnostics()
         initialization_started = time.monotonic()
 
@@ -102,6 +121,13 @@ class LieDetectorSdkTracker:
         self._recent_records = deque(maxlen=256)
         self._recent_frames = deque(maxlen=11)
         self._last_frame_sample_at = float("-inf")
+        self._session_id = None
+        self._session_records = []
+        self._session_frames = []
+        self._session_bytes = 0
+        self._session_truncated = False
+        self._session_records_truncated = False
+        self._session_next_sample_at = None
 
     def _log_summary(self, reason: str, now: float) -> None:
         frames = sum(self._status_counts)
@@ -192,10 +218,75 @@ class LieDetectorSdkTracker:
             self._recent_records.popleft()
         while self._recent_frames and self._recent_frames[0][1] < cutoff:
             self._recent_frames.popleft()
+        sampled_frame = None
         if captured_at - self._last_frame_sample_at >= 0.2:
-            self._recent_frames.append((record["frame"], captured_at, frame.copy()))
+            sampled_frame = frame.copy()
+            self._recent_frames.append((record["frame"], captured_at, sampled_frame))
             self._last_frame_sample_at = captured_at
+        if self.session_recording:
+            self._record_session_frame(frame, record, sampled_frame)
         return record
+
+    def _record_session_frame(self, frame, record, sampled_frame):
+        captured_at = record["captured_at"]
+        if self._session_next_sample_at is None:
+            self._session_next_sample_at = captured_at
+            logger.info(
+                f"[Lie Detector SDK] Session recording started; session={self._session_id}; "
+                f"image_fps={self.session_image_fps}; max_image_memory_mb={self._session_max_bytes / 1048576:.1f}; "
+                "saving after reset/stop; CSV records each SDK call."
+            )
+        if len(self._session_records) < 10000:
+            self._session_records.append(record)
+        elif not self._session_records_truncated:
+            self._session_records_truncated = True
+            logger.warning("[Lie Detector SDK] Session reached 10000 records; further session recording skipped.")
+        if self._session_records_truncated or self._session_truncated:
+            return
+        if captured_at + 1e-9 < self._session_next_sample_at:
+            return
+        if self._session_bytes + frame.nbytes > self._session_max_bytes:
+            self._session_truncated = True
+            logger.warning(
+                "[Lie Detector SDK] Session image memory limit reached; "
+                "keeping existing samples and continuing CSV/SDK processing."
+            )
+            return
+        if sampled_frame is None:
+            sampled_frame = frame.copy()
+        self._session_frames.append((record["frame"], sampled_frame))
+        self._session_bytes += frame.nbytes
+        period = 1.0 / self.session_image_fps
+        start = self._session_records[0]["captured_at"]
+        self._session_next_sample_at = start + (math.floor((captured_at - start) / period + 1e-9) + 1) * period
+
+    def _save_session(self, reason):
+        if not self._session_records:
+            return
+        metadata = {
+            "session_id": self._session_id,
+            "reason": reason,
+            "image_fps": self.session_image_fps,
+            "image_memory_bytes": self._session_bytes,
+            "max_image_memory_bytes": self._session_max_bytes,
+            "records": len(self._session_records),
+            "sampled_frames": len(self._session_frames),
+            "captured_start": self._session_records[0]["captured_at"],
+            "captured_end": self._session_records[-1]["captured_at"],
+            "backend": self.backend,
+            "input_wh": list(self._frame_size),
+            "truncated": self._session_truncated or self._session_records_truncated,
+            "images_truncated": self._session_truncated,
+            "records_truncated": self._session_records_truncated,
+        }
+        queued = save_session(self._session_records, self._session_frames, metadata)
+        if queued is not None:
+            logger.info(
+                f"[Lie Detector SDK] Session save queued; directory=log/lie_sdk_sessions/{self._session_id}; "
+                f"records={len(self._session_records)}; sampled_frames={len(self._session_frames)}."
+            )
+        self._session_records = []
+        self._session_frames = []
 
     def record_mouse_action(self, timestamp, action, location, call_ms, completed_at):
         with self._lock:
@@ -217,7 +308,7 @@ class LieDetectorSdkTracker:
         if self._recent_records:
             first = self._recent_records[0]["frame"]
             frames = [(number, frame) for number, _timestamp, frame in self._recent_frames if number >= first]
-            save_recent_trace(list(self._recent_records), frames, reason)
+            save_recent_trace(list(self._recent_records), frames, reason, self._session_id)
 
     def _bind_functions(self) -> None:
         integer = ctypes.c_int
@@ -271,10 +362,13 @@ class LieDetectorSdkTracker:
             self._frame_size = frame_size
             out = (ctypes.c_int * 8)()
             if self._first_feed_at is None:
+                self._session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + uuid.uuid4().hex[:8]
                 logger.info(
                     f"[Lie Detector SDK] First input roi_wh=({width},{height}); "
-                    f"stride={frame.strides[0]}; fmt=BGR24; backend={self.backend}."
+                    f"stride={frame.strides[0]}; fmt=BGR24; backend={self.backend}; "
+                    f"diagnostic_directory=log/lie_sdk_sessions/{self._session_id}."
                 )
+                save_input_snapshot(frame, self._session_id)
             call_started = time.monotonic()
             status = self._lib.TTx_Detect(
                 self._handle,
@@ -294,7 +388,7 @@ class LieDetectorSdkTracker:
             )
             record = self._record_recent_frame(frame, out, status, timestamp, completed_at, call_ms)
             if first_lock:
-                save_first_lock_snapshot(frame, record)
+                save_first_lock_snapshot(frame, record, self._session_id)
             if status == 2:
                 reason = _error_text(self._lib.TTx_LastError(self._handle))
                 raise RuntimeError(
@@ -331,6 +425,7 @@ class LieDetectorSdkTracker:
             raise RuntimeError(_error_text(self._lib.TTx_LastError(self._handle)))
         self._log_summary("reset", time.monotonic())
         self._save_recent_trace("reset")
+        self._save_session("reset")
         self._clear_diagnostics()
         self._frame_size = None
         self.last_ms = 0
@@ -346,6 +441,7 @@ class LieDetectorSdkTracker:
                 if self._handle:
                     self._log_summary("close", time.monotonic())
                     self._save_recent_trace("close")
+                    self._save_session("close")
                     self._lib.TTx_Destroy(self._handle)
             finally:
                 self._handle = None
@@ -353,6 +449,8 @@ class LieDetectorSdkTracker:
                 self._frame_size = None
                 self._recent_records.clear()
                 self._recent_frames.clear()
+                self._session_records.clear()
+                self._session_frames.clear()
                 if self._dll_directory is not None:
                     self._dll_directory.close()
                     self._dll_directory = None

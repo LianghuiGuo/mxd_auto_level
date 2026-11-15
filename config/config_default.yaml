@@ -467,6 +467,10 @@ lie_detector:
   sdk_force_cpu: false
   # Fixed x, y, width, height in the title-free capture; no automatic scaling.
   sdk_roi: [290, 81, 702, 468]
+  # Cache session raw images at 3 FPS; write images and per-call CSV after stop/reset.
+  sdk_session_recording: true
+  sdk_session_image_fps: 3.0
+  sdk_session_max_memory_mb: 128.0
   model: "models/lie_shape_yolo_manual.pt"
   confidence: 0.28
   image_size: 768
